@@ -1,0 +1,16 @@
+[workspace]
+resolver = "3"
+members = ["crates/meetscribe-core", "crates/meetscribe-app", "crates/meetscribe-cli"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+
+# 這台機器的分頁檔偏小，debug 符號會讓 rustc 在大型相依（windows、wgpu）上記憶體不足
+[profile.dev]
+debug = 0

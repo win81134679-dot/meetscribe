@@ -1,0 +1,232 @@
+//! 端對端：真的 ffmpeg ＋ 模擬的 OpenRouter。沒有 ffmpeg 的機器會略過。
+
+use meetscribe_core::audio::Ffmpeg;
+use meetscribe_core::config::{AppPaths, LlmProvider, Settings};
+use meetscribe_core::export;
+use meetscribe_core::model::{JobOptions, Project, ProjectStatus, Timing};
+use meetscribe_core::pipeline::{Engine, Event, EventSink};
+use meetscribe_core::secrets::ApiKeys;
+use std::path::Path;
+use std::sync::{Arc, Mutex};
+use tokio_util::sync::CancellationToken;
+use wiremock::matchers::{body_string_contains, method, path};
+use wiremock::{Mock, MockServer, ResponseTemplate};
+
+/// 300 秒的測試音，115～118 秒、235～238 秒是靜音。
+async fn make_audio(ffmpeg: &Ffmpeg, out: &Path) {
+    let status = tokio::process::Command::new(&ffmpeg.ffmpeg)
+        .args([
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=300:duration=300",
+        ])
+        .args(["-af", "volume=enable='between(t,115,118)+between(t,235,238)':volume=0"])
+        .arg(out)
+        .status()
+        .await
+        .unwrap();
+    assert!(status.success());
+}
+
+fn chat(content: &str) -> ResponseTemplate {
+    ResponseTemplate::new(200).set_body_json(serde_json::json!({
+        "choices": [{ "message": { "content": content }, "finish_reason": "stop" }],
+        "usage": { "prompt_tokens": 100, "completion_tokens": 20, "cost": 0.01 }
+    }))
+}
+
+async fn mock_openrouter() -> MockServer {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/models/nvidia/nemotron-3.5-transcribe/endpoints"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": { "endpoints": [{ "provider_name": "DeepInfra", "supports_diarization": false,
+                                      "pricing": { "prompt": "0.0000333" } }] }
+        })))
+        .mount(&server)
+        .await;
+    // 第一次轉錄回 503（要能自動重試）
+    Mock::given(method("POST"))
+        .and(path("/audio/transcriptions"))
+        .respond_with(
+            ResponseTemplate::new(503)
+                .insert_header("Retry-After", "0")
+                .set_body_json(serde_json::json!({ "error": { "code": 503, "message": "overloaded" } })),
+        )
+        .up_to_n_times(1)
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/audio/transcriptions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "text": "大家好。我是王經理。今天討論預算。",
+            "usage": { "cost": 0.004, "seconds": 120.0 }
+        })))
+        .with_priority(2)
+        .mount(&server)
+        .await;
+    // 說話者分配走模擬的 Google AI Studio（Gemini 原生 API）
+    Mock::given(method("GET"))
+        .and(path("/gemini/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "models": [
+                { "name": "models/gemini-3.8-flash", "supportedGenerationMethods": ["generateContent"] },
+                { "name": "models/gemini-3.5-flash-lite", "supportedGenerationMethods": ["generateContent"] }
+            ]
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/gemini/models/gemini-3.8-flash:generateContent"))
+        .and(body_string_contains("說話者標註員"))
+        .and(body_string_contains("inline_data"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "candidates": [{ "content": { "parts": [{ "text":
+                "```json
+{\"speakers\":[{\"id\":\"N1\",\"name\":\"王經理\",\"note\":\"男聲\"}],\"a\":[[0,\"N1\",0],[1,\"N1\",30.5],[2,\"N1\",60]]}
+```"
+            }] }, "finishReason": "STOP" }],
+            "usageMetadata": { "promptTokenCount": 5000, "candidatesTokenCount": 50 }
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .and(body_string_contains("說話者清單"))
+        .respond_with(chat(
+            r#"{"merges":[{"from":"S2","into":"S1","reason":"同一人"}],"names":[]}"#,
+        ))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .and(body_string_contains("會議記錄秘書"))
+        .respond_with(chat("```markdown\n# 預算會議\n- 王經理說明預算\n```"))
+        .mount(&server)
+        .await;
+    server
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn full_pipeline_with_two_chunks() {
+    let Ok(ffmpeg) = Ffmpeg::locate("") else {
+        eprintln!("略過：找不到 ffmpeg");
+        return;
+    };
+    let tmp = tempfile::tempdir().unwrap();
+    let paths = AppPaths::at(tmp.path().join("home"));
+    paths.ensure().unwrap();
+    let source = tmp.path().join("預算會議.wav");
+    make_audio(&ffmpeg, &source).await;
+
+    let server = mock_openrouter().await;
+    // 不經 sanitized()：測試需要比使用者下限更短的分段
+    let settings = Settings {
+        api_base: server.uri(),
+        google_api_base: format!("{}/gemini", server.uri()),
+        attribution_provider: LlmProvider::Google,
+        attribution_model: "gemini-9-不存在".into(),
+        summary_provider: LlmProvider::OpenRouter,
+        summary_model: "nvidia/nemotron-3-ultra-550b-a55b:free".into(),
+        chunk_minutes: 2,
+        max_retries: 2,
+        ..Default::default()
+    };
+    let keys = ApiKeys {
+        openrouter: "sk-test".into(),
+        google: Some("AIza-test".into()),
+    };
+    let engine = Engine::from_settings(&paths, settings, keys).await.unwrap();
+    // 設定的 Gemini 模型不存在 → 自動挑最好的 Flash
+    assert_eq!(engine.settings.attribution_model, "gemini-3.8-flash");
+    assert!((engine.estimate_cost(3600.0).unwrap() - 0.11988).abs() < 1e-6);
+
+    let events: Arc<Mutex<Vec<Event>>> = Arc::default();
+    let sink: EventSink = {
+        let events = events.clone();
+        Arc::new(move |e| events.lock().unwrap().push(e))
+    };
+    let options = JobOptions {
+        participants: vec!["王經理".into()],
+        ..Default::default()
+    };
+    let project = Project::new(source.clone(), options);
+    let done = engine.run(project, sink, CancellationToken::new()).await;
+
+    assert_eq!(done.status, ProjectStatus::Done, "warnings: {:?}", done.warnings);
+    assert_eq!(done.chunks.len(), 2, "應在 115～118 秒的停頓切成兩段");
+    assert!((done.chunks[0].end - 116.5).abs() < 0.5, "切點 {}", done.chunks[0].end);
+    assert_eq!(done.segments.len(), 6);
+    assert!(done.segments.iter().all(|s| s.timing == Timing::Model));
+    // 第二段的時間是全域時間
+    assert!((done.segments[4].start - (done.chunks[1].start + 30.5)).abs() < 1e-6);
+    // 跨段同一人被合併，名字來自模型
+    assert_eq!(done.speakers.len(), 1);
+    assert_eq!(done.speakers[0].name, "王經理");
+    assert!(done.speakers[0].sample_clip.is_some());
+    assert!(done.segments.iter().all(|s| s.speaker.as_deref() == Some("S1")));
+    let summary = done.summary.as_ref().unwrap();
+    assert!(summary.markdown.starts_with("# 預算會議"), "外層 ``` 應被拿掉");
+    assert!((done.usage.stt_usd - 0.008).abs() < 1e-9);
+    assert!(done.usage.llm_usd > 0.0);
+    assert_eq!(done.models.attribution, "gemini-3.8-flash");
+    assert!(done.usage.llm_input_tokens >= 10_000, "Gemini 的 token 有記到");
+
+    // 存檔可重新讀回，並可匯出所有格式
+    let reloaded = engine.store.load(done.id).unwrap();
+    assert_eq!(reloaded, done);
+    let ids: Vec<String> = export::registry().iter().map(|e| e.id().to_string()).collect();
+    let written = export::export_all(&done, &ids, &tmp.path().join("out")).unwrap();
+    assert_eq!(written.len(), ids.len());
+
+    // 再跑一次（續跑）不應重送任何請求
+    let before = server.received_requests().await.unwrap().len();
+    let again = engine.run(reloaded, Arc::new(|_| {}), CancellationToken::new()).await;
+    assert_eq!(again.status, ProjectStatus::Done);
+    assert_eq!(server.received_requests().await.unwrap().len(), before);
+
+    let ev = events.lock().unwrap();
+    assert!(ev.iter().any(|e| matches!(e, Event::Progress { .. })));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn cancel_marks_project_resumable() {
+    let Ok(ffmpeg) = Ffmpeg::locate("") else { return };
+    let tmp = tempfile::tempdir().unwrap();
+    let paths = AppPaths::at(tmp.path().to_path_buf());
+    paths.ensure().unwrap();
+    let source = tmp.path().join("a.wav");
+    make_audio(&ffmpeg, &source).await;
+    let server = mock_openrouter().await;
+    let settings = Settings {
+        api_base: server.uri(),
+        ..Default::default()
+    };
+    let keys = ApiKeys {
+        openrouter: "sk-test".into(),
+        google: None,
+    };
+    let engine = Engine::from_settings(&paths, settings, keys).await.unwrap();
+    // 沒有 Google Key → 說話者分配改用 OpenRouter 免費模型
+    assert!(engine.settings.attribution_model.ends_with(":free"));
+    // 預設摘要也是免費：沒有 Google Key 時退到 OpenRouter 的免費模型
+    assert!(
+        engine.settings.summary_model.ends_with(":free"),
+        "{}",
+        engine.settings.summary_model
+    );
+    assert!(!engine.notices.is_empty());
+    let cancel = CancellationToken::new();
+    cancel.cancel();
+    let p = engine
+        .run(Project::new(source, JobOptions::default()), Arc::new(|_| {}), cancel)
+        .await;
+    assert_eq!(p.status, ProjectStatus::Cancelled);
+    assert!(p.status.is_resumable());
+}
