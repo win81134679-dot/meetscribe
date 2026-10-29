@@ -52,6 +52,13 @@
 - reqwest 0.13 用 `native-tls`（`rustls` 預設走 aws-lc-rs 要 cmake）；`.query()` 要 `query` feature。
 - 含反斜線或 `"#` 的補丁：用 Python 腳本檔（scratchpad），別用 Bash heredoc；Rust 原始字串內含 `"#` 時用 `r##"…"##`。
 
+## 架構圖
+
+`docs/架構圖/HTML/{執行架構圖,處理流程圖}.html`（diagram-design，eight-hue 配色；橘色只給「唯一付費」的 Nemotron）。
+A2 橫式滿版：body 2245×1587、SVG viewBox 1280×904。改了 HTML 就重產：
+`node 工具/render_diagram_a2.mjs docs/架構圖/HTML/<名稱>.html` → `PNG/`（7016×4959、pHYs 300 DPI）與 `PDF/`（向量單頁）。
+需要本機 Chrome；渲染器、`cdp.mjs`、`set_png_dpi.py` 是從 Filee 專案複製來的。改了費用分工或流程階段，兩張圖要跟著改。
+
 ## 驗證
 
 ```powershell

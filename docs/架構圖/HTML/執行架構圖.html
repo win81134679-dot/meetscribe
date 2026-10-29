@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>MeetScribe 執行架構圖</title>
+  <link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500;600&family=Noto+Sans+TC:wght@400;500;600&family=Noto+Serif+TC:wght@400&display=swap" rel="stylesheet">
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body { background: #f4f7fb; }
+    /* A2 橫式滿版（594×420 mm = 2245×1587 CSS px）：SVG 就是整頁，標題也畫在 SVG 裡 */
+    body { width: 2245px; height: 1587px; overflow: hidden; }
+    .diagram-container { width: 2245px; height: 1587px; overflow-x: auto; }
+    svg { width: 2245px; height: 1587px; min-width: 1280px; display: block; }
+    .t-title { font: 400 44px 'Instrument Serif', 'Noto Serif TC', serif; letter-spacing: -0.01em; }
+    .t-eyebrow { font: 500 13px 'Geist', 'Noto Sans TC', 'Microsoft JhengHei', system-ui, sans-serif; }
+    .t-name { font: 600 16px 'Geist', 'Noto Sans TC', 'PingFang TC', 'Microsoft JhengHei', system-ui, sans-serif; }
+    .t-sub  { font: 400 12px 'Geist', 'Noto Sans TC', 'PingFang TC', 'Microsoft JhengHei', system-ui, sans-serif; }
+    .t-mono { font: 400 12px 'Geist Mono', ui-monospace, monospace; }
+    .t-tag  { font: 500 8px 'Geist Mono', ui-monospace, monospace; letter-spacing: 0.08em; }
+    .t-lbl  { font: 500 12px 'Geist', 'Noto Sans TC', 'PingFang TC', 'Microsoft JhengHei', system-ui, sans-serif; }
+    .t-zone { font: 500 13px 'Geist', 'Noto Sans TC', 'PingFang TC', 'Microsoft JhengHei', system-ui, sans-serif; }
+    .t-callout { font: italic 400 16px 'Instrument Serif', 'Noto Serif TC', serif; }
+  </style>
+</head>
+<body>
+<div class="diagram-container">
+<svg viewBox="0 0 1280 904" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="ms-arch-title ms-arch-desc">
+<title id="ms-arch-title">MeetScribe 執行架構圖</title>
+<desc id="ms-arch-desc">使用者把錄音拖進 MeetScribe 桌面程式，處理流程在本機用 ffmpeg 轉檔切段、存專案資料；逐字稿送 OpenRouter 上付費的 Nemotron 3.5 Transcribe，說話者分配、整合與摘要預設用 Google AI Studio 的 Gemini 免費額度，沒有 Google Key 時改用 OpenRouter 免費模型，摘要也可手動改用本機 Claude Code CLI。</desc>
+<defs>
+<marker id="ms-arch-arr-in" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#2196f3"/></marker>
+<marker id="ms-arch-arr-proc" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#3949ab"/></marker>
+<marker id="ms-arch-arr-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#e27e00"/></marker>
+</defs>
+
+<!-- 背景與標題 -->
+<rect width="100%" height="100%" fill="#f4f7fb"/>
+<text x="40" y="56" class="t-eyebrow" fill="#44506b">架構圖 · MeetScribe 會議逐字稿（Rust 桌面程式）</text>
+<text x="40" y="112" class="t-title" fill="#14213d">只有逐字稿這一步付費，說話者與摘要走免費模型</text>
+
+<!-- 區塊（最先畫） -->
+<rect x="296" y="160" width="568" height="528" rx="8" fill="#14213d" fill-opacity="0.02" stroke="#14213d" stroke-opacity="0.10" stroke-width="0.8"/>
+<text x="312" y="184" class="t-zone" fill="#56627c">你的電腦 · Windows</text>
+<text x="848" y="184" class="t-mono" fill="#56627c" text-anchor="end">target\release\meetscribe-app.exe</text>
+<rect x="896" y="160" width="336" height="528" rx="8" fill="#14213d" fill-opacity="0.02" stroke="#14213d" stroke-opacity="0.10" stroke-width="0.8" stroke-dasharray="5,4"/>
+<text x="912" y="184" class="t-zone" fill="#56627c">雲端 API</text>
+
+<!-- 連線（在節點之前） -->
+<line x1="264" y1="268" x2="318" y2="268" stroke="#2196f3" stroke-width="1.2" marker-end="url(#ms-arch-arr-in)"/>
+<line x1="544" y1="242" x2="598" y2="242" stroke="#3949ab" stroke-width="1.2" marker-end="url(#ms-arch-arr-proc)"/>
+<line x1="840" y1="242" x2="918" y2="242" stroke="#e27e00" stroke-width="1.6" marker-end="url(#ms-arch-arr-accent)"/>
+<path d="M 840,268 H 876 Q 884,268 884,276 V 444 Q 884,452 892,452 H 918" fill="none" stroke="#3949ab" stroke-width="1.2" marker-end="url(#ms-arch-arr-proc)"/>
+<path d="M 840,294 H 864 Q 872,294 872,302 V 596 Q 872,604 880,604 H 918" fill="none" stroke="#3949ab" stroke-width="1.2" stroke-dasharray="5,4" marker-end="url(#ms-arch-arr-proc)"/>
+<line x1="720" y1="320" x2="720" y2="406" stroke="#3949ab" stroke-width="1.2" marker-end="url(#ms-arch-arr-proc)"/>
+<path d="M 600,268 H 580 Q 572,268 572,276 V 444 Q 572,452 564,452 H 546" fill="none" stroke="#3949ab" stroke-width="1.2" marker-end="url(#ms-arch-arr-proc)"/>
+<path d="M 600,294 H 592 Q 584,294 584,302 V 596 Q 584,604 576,604 H 546" fill="none" stroke="#3949ab" stroke-width="1.2" stroke-dasharray="5,4" marker-end="url(#ms-arch-arr-proc)"/>
+
+<!-- 連線標籤（遮罩在線外，留 8px） -->
+<rect x="268" y="244" width="48" height="16" rx="2" fill="#f4f7fb"/>
+<text x="292" y="256" class="t-lbl" fill="#1a75be" text-anchor="middle">拖放</text>
+<rect x="548" y="218" width="48" height="16" rx="2" fill="#f4f7fb"/>
+<text x="572" y="230" class="t-lbl" fill="#3949ab" text-anchor="middle">排隊</text>
+<rect x="851" y="218" width="56" height="16" rx="2" fill="#f4f7fb"/>
+<text x="879" y="230" class="t-lbl" fill="#a65c00" text-anchor="middle">分段音訊</text>
+<rect x="728" y="352" width="68" height="16" rx="2" fill="#f4f7fb"/>
+<text x="762" y="364" class="t-lbl" fill="#3949ab" text-anchor="middle">轉檔・切段</text>
+
+<!-- 節點：使用者（輸入，藍） -->
+<rect x="64" y="216" width="200" height="104" rx="6" fill="#f4f7fb"/>
+<rect x="64" y="216" width="200" height="104" rx="6" fill="#c1e0f9" stroke="#2196f3" stroke-width="1.2"/>
+<rect x="72" y="222" width="32" height="12" rx="2" fill="none" stroke="#2196f3" stroke-opacity="0.6" stroke-width="0.8"/>
+<text x="88" y="231" class="t-tag" fill="#1663a0" text-anchor="middle">USER</text>
+<text x="164" y="258" class="t-name" fill="#14213d" text-anchor="middle">使用者</text>
+<text x="164" y="280" class="t-sub" fill="#44506b" text-anchor="middle">拖放錄音或影片檔</text>
+<text x="164" y="300" class="t-sub" fill="#44506b" text-anchor="middle">核對逐字稿、改說話者</text>
+
+<!-- 節點：桌面程式（處理，靛） -->
+<rect x="320" y="216" width="224" height="104" rx="6" fill="#f4f7fb"/>
+<rect x="320" y="216" width="224" height="104" rx="6" fill="#c7cde8" stroke="#3949ab" stroke-width="1.2"/>
+<rect x="328" y="222" width="28" height="12" rx="2" fill="none" stroke="#3949ab" stroke-opacity="0.6" stroke-width="0.8"/>
+<text x="342" y="231" class="t-tag" fill="#3949ab" text-anchor="middle">APP</text>
+<text x="432" y="258" class="t-name" fill="#14213d" text-anchor="middle">MeetScribe 桌面程式</text>
+<text x="432" y="280" class="t-mono" fill="#44506b" text-anchor="middle">meetscribe-app · egui</text>
+<text x="432" y="300" class="t-sub" fill="#44506b" text-anchor="middle">批次用 meetscribe-cli，同一套</text>
+
+<!-- 節點：處理流程（處理，靛） -->
+<rect x="600" y="216" width="240" height="104" rx="6" fill="#f4f7fb"/>
+<rect x="600" y="216" width="240" height="104" rx="6" fill="#c7cde8" stroke="#3949ab" stroke-width="1.2"/>
+<rect x="608" y="222" width="32" height="12" rx="2" fill="none" stroke="#3949ab" stroke-opacity="0.6" stroke-width="0.8"/>
+<text x="624" y="231" class="t-tag" fill="#3949ab" text-anchor="middle">CORE</text>
+<text x="720" y="258" class="t-name" fill="#14213d" text-anchor="middle">處理流程</text>
+<text x="720" y="280" class="t-mono" fill="#44506b" text-anchor="middle">meetscribe-core</text>
+<text x="720" y="300" class="t-sub" fill="#44506b" text-anchor="middle">分段・轉錄・說話者・摘要・匯出</text>
+
+<!-- 節點：ffmpeg（外部，灰藍） -->
+<rect x="600" y="408" width="240" height="88" rx="6" fill="#f4f7fb"/>
+<rect x="600" y="408" width="240" height="88" rx="6" fill="#d6dee4" stroke="#78909c" stroke-width="1.2"/>
+<rect x="608" y="414" width="24" height="12" rx="2" fill="none" stroke="#78909c" stroke-opacity="0.6" stroke-width="0.8"/>
+<text x="620" y="423" class="t-tag" fill="#4f5f67" text-anchor="middle">EXT</text>
+<text x="720" y="446" class="t-name" fill="#14213d" text-anchor="middle">ffmpeg</text>
+<text x="720" y="466" class="t-mono" fill="#44506b" text-anchor="middle">16 kHz mono · silencedetect</text>
+<text x="720" y="484" class="t-sub" fill="#44506b" text-anchor="middle">轉檔、在停頓處切段</text>
+
+<!-- 節點：本機資料（儲存，青） -->
+<rect x="320" y="408" width="224" height="88" rx="6" fill="#f4f7fb"/>
+<rect x="320" y="408" width="224" height="88" rx="6" fill="#b9dddc" stroke="#00897b" stroke-width="1.2"/>
+<rect x="328" y="414" width="32" height="12" rx="2" fill="none" stroke="#00897b" stroke-opacity="0.6" stroke-width="0.8"/>
+<text x="344" y="423" class="t-tag" fill="#00685d" text-anchor="middle">DATA</text>
+<text x="432" y="446" class="t-name" fill="#14213d" text-anchor="middle">本機資料</text>
+<text x="432" y="466" class="t-mono" fill="#44506b" text-anchor="middle">%APPDATA%\MeetScribe</text>
+<text x="432" y="484" class="t-sub" fill="#44506b" text-anchor="middle">專案與音訊；金鑰在認證管理員</text>
+
+<!-- 節點：Claude Code CLI（可選，黃虛線） -->
+<rect x="320" y="560" width="224" height="88" rx="6" fill="#f4f7fb"/>
+<rect x="320" y="560" width="224" height="88" rx="6" fill="#f6eaca" stroke="#d8a527" stroke-width="1.2" stroke-dasharray="4,3"/>
+<rect x="328" y="566" width="28" height="12" rx="2" fill="none" stroke="#d8a527" stroke-opacity="0.8" stroke-width="0.8"/>
+<text x="342" y="575" class="t-tag" fill="#836417" text-anchor="middle">OPT</text>
+<text x="432" y="598" class="t-name" fill="#14213d" text-anchor="middle">Claude Code CLI</text>
+<text x="432" y="618" class="t-mono" fill="#44506b" text-anchor="middle">claude -p</text>
+<text x="432" y="636" class="t-sub" fill="#44506b" text-anchor="middle">手動切換時改由它寫摘要</text>
+
+<!-- 節點：Nemotron（焦點，橘） -->
+<rect x="920" y="216" width="288" height="104" rx="6" fill="#f4f7fb"/>
+<rect x="920" y="216" width="288" height="104" rx="6" fill="#f6ddbf" stroke="#fb8c00" stroke-width="1.2"/>
+<rect x="928" y="222" width="28" height="12" rx="2" fill="none" stroke="#fb8c00" stroke-opacity="0.6" stroke-width="0.8"/>
+<text x="942" y="231" class="t-tag" fill="#925100" text-anchor="middle">STT</text>
+<text x="1064" y="258" class="t-name" fill="#14213d" text-anchor="middle">Nemotron 3.5 Transcribe</text>
+<text x="1064" y="280" class="t-mono" fill="#44506b" text-anchor="middle">OpenRouter · /audio/transcriptions</text>
+<text x="1064" y="300" class="t-sub" fill="#a65c00" text-anchor="middle">完整逐字稿・唯一付費 ≈ US$0.12／小時</text>
+
+<!-- 節點：Gemini（AI，紫） -->
+<rect x="920" y="408" width="288" height="88" rx="6" fill="#f4f7fb"/>
+<rect x="920" y="408" width="288" height="88" rx="6" fill="#dcc4e8" stroke="#8e24aa" stroke-width="1.2"/>
+<rect x="928" y="414" width="20" height="12" rx="2" fill="none" stroke="#8e24aa" stroke-opacity="0.6" stroke-width="0.8"/>
+<text x="938" y="423" class="t-tag" fill="#8b23a7" text-anchor="middle">AI</text>
+<text x="1064" y="446" class="t-name" fill="#14213d" text-anchor="middle">Gemini Flash（免費額度）</text>
+<text x="1064" y="466" class="t-mono" fill="#44506b" text-anchor="middle">Google AI Studio · generateContent</text>
+<text x="1064" y="484" class="t-sub" fill="#44506b" text-anchor="middle">聽音訊分配說話者・整合・摘要</text>
+
+<!-- 節點：OpenRouter 免費備援（可選，黃虛線） -->
+<rect x="920" y="560" width="288" height="88" rx="6" fill="#f4f7fb"/>
+<rect x="920" y="560" width="288" height="88" rx="6" fill="#f6eaca" stroke="#d8a527" stroke-width="1.2" stroke-dasharray="4,3"/>
+<rect x="928" y="566" width="28" height="12" rx="2" fill="none" stroke="#d8a527" stroke-opacity="0.8" stroke-width="0.8"/>
+<text x="942" y="575" class="t-tag" fill="#836417" text-anchor="middle">OPT</text>
+<text x="1064" y="598" class="t-name" fill="#14213d" text-anchor="middle">OpenRouter 免費模型</text>
+<text x="1064" y="618" class="t-mono" fill="#44506b" text-anchor="middle">nemotron-…-omni / -ultra :free</text>
+<text x="1064" y="636" class="t-sub" fill="#44506b" text-anchor="middle">沒設 Google Key 時自動改用</text>
+
+<!-- 說明 -->
+<text x="64" y="420" class="t-callout" fill="#44506b">逐字稿文字只來自 Nemotron；</text>
+<text x="64" y="444" class="t-callout" fill="#44506b">Gemini 只回答「第幾句</text>
+<text x="64" y="468" class="t-callout" fill="#44506b">是誰說的」，所以不會漏字。</text>
+
+<!-- 圖例 -->
+<line x1="40" y1="764" x2="1240" y2="764" stroke="#44506b" stroke-opacity="0.25" stroke-width="0.8"/>
+<text x="40" y="796" class="t-lbl" fill="#44506b">圖例</text>
+<rect x="88" y="786" width="14" height="10" rx="2" fill="#f6ddbf" stroke="#fb8c00" stroke-width="1"/>
+<text x="110" y="796" class="t-sub" fill="#44506b">付費的那一步（焦點）</text>
+<rect x="246" y="786" width="14" height="10" rx="2" fill="#c1e0f9" stroke="#2196f3" stroke-width="1"/>
+<text x="268" y="796" class="t-sub" fill="#44506b">使用者</text>
+<rect x="326" y="786" width="14" height="10" rx="2" fill="#c7cde8" stroke="#3949ab" stroke-width="1"/>
+<text x="348" y="796" class="t-sub" fill="#44506b">MeetScribe 程式</text>
+<rect x="464" y="786" width="14" height="10" rx="2" fill="#dcc4e8" stroke="#8e24aa" stroke-width="1"/>
+<text x="486" y="796" class="t-sub" fill="#44506b">免費 AI 模型</text>
+<rect x="582" y="786" width="14" height="10" rx="2" fill="#f6eaca" stroke="#d8a527" stroke-width="1" stroke-dasharray="3,2"/>
+<text x="604" y="796" class="t-sub" fill="#44506b">可選／備援</text>
+<rect x="690" y="786" width="14" height="10" rx="2" fill="#b9dddc" stroke="#00897b" stroke-width="1"/>
+<text x="712" y="796" class="t-sub" fill="#44506b">本機資料</text>
+<rect x="786" y="786" width="14" height="10" rx="2" fill="#d6dee4" stroke="#78909c" stroke-width="1"/>
+<text x="808" y="796" class="t-sub" fill="#44506b">外部工具</text>
+<line x1="884" y1="791" x2="912" y2="791" stroke="#3949ab" stroke-width="1.2" stroke-dasharray="5,4" marker-end="url(#ms-arch-arr-proc)"/>
+<text x="920" y="796" class="t-sub" fill="#44506b">只在設定或缺 Key 時才走（線色同起點）</text>
+</svg>
+</div>
+</body>
+</html>

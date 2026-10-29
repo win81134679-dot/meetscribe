@@ -11,6 +11,14 @@
 
 沒設定 Google Key 時，說話者與摘要會自動改用 OpenRouter 上的免費模型（`nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free`、`nvidia/nemotron-3-ultra-550b-a55b:free`），一樣不花錢。
 
+## 架構一覽
+
+| 執行架構圖 | 處理流程圖 |
+|---|---|
+| ![執行架構圖](docs/架構圖/PNG/執行架構圖.png) | ![處理流程圖](docs/架構圖/PNG/處理流程圖.png) |
+
+A2 橫式 300 DPI；同名向量 PDF 在 `docs/架構圖/PDF/`，原始檔在 `docs/架構圖/HTML/`。
+
 ## 需要準備
 
 1. **ffmpeg**：`winget install Gyan.FFmpeg`（程式會自己找；找不到可在設定指定位置）。
