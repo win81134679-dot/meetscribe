@@ -2,6 +2,12 @@
 
 使用者看的說明在 `README.md`，設計決定與里程碑在 `PLAN.md`。這份只記改程式時查不到、會踩的事。
 
+## Git
+
+私有 repo `win81134679-dot/meetscribe`（2026-10-30 建，分支 `main`）。這個資料夾是**獨立的 repo**，不是上層「一堆專案」repo 的一部分。
+本 repo 的提交身分設在 local config：`win81134679-dot` ＋ GitHub noreply 信箱（全域沒設 user.email）。
+`.gitattributes` 固定 LF，只有 `.cmd`、`.url` 是 CRLF；`target/` 不進版控。推之前掃一次祕密（`sk-or-`、`AIza`、`gh?_`）。
+
 ## 地圖
 
 - `crates/meetscribe-core`：全部邏輯。`pipeline.rs` 串起五個階段（前處理→轉錄→說話者分配→整合→摘要），每階段完成就存檔、可續跑。
