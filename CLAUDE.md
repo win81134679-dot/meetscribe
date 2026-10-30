@@ -22,6 +22,9 @@
 有 Key 後縮成帳戶列（餘額＋儲值、API Keys 按鈕；啟動時自動 `TestKey` 查餘額）。外部網址集中在 `theme::links`。
 金鑰輸入框只有一份實作：`views::settings::key_box`，新增轉錄頁與設定頁共用同一組 `SettingsForm` 狀態。
 
+發佈：`installer\build-installer.ps1`（測試 → release → Inno Setup）產出 `dist\MeetScribe-Setup-v<版本>.exe`；版本號在根 `Cargo.toml` 與三個 crate（app、cli 對 core 的相依版本也要一起改）。
+安裝程式的 `AppId` 第一次發佈後不能再改。ffmpeg 不打包（完整版每個 exe 2 百多 MB），安裝最後一頁用 winget 補。1.0.0 於 2026-10-31 發佈到 GitHub Release。
+建置時記憶體吃緊（可用虛擬記憶體不到 2 GB）連 `-j 1` 都會 OOM，請使用者先關程式，不要改 LTO 或另開 target 目錄硬編。
 快速開啟：專案根目錄的 `開啟 MeetScribe.cmd`（`%~dp0` 相對路徑，不寫死中文路徑）指向 `target\release\meetscribe-app.exe`。
 刻意不由 AI 建 `.lnk`：全域 CLAUDE.md〈防毒〉記過「claude.exe 建指向自編未簽章 exe 的捷徑」被 Bitdefender 判刑；要 `.lnk` 請使用者自己「傳送到桌面」。
 程式開著時 exe 被鎖住，`cargo build --release` 會失敗——先關視窗再建。
