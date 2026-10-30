@@ -1,4 +1,4 @@
-//! 設定：兩把 API Key（存在 Windows 認證管理員）、各工作的模型與供應商、處理參數、進階。
+//! 設定：兩把 API Key（存在 Windows 認證管理員）、各工作的模型與供應商、輸出、處理參數、進階。
 
 use crate::app::MeetApp;
 use crate::theme::{self, icon, pal};
@@ -313,6 +313,14 @@ pub fn show(app: &mut MeetApp, ui: &mut Ui) {
                     }
                 }
             }
+        });
+
+        theme::section(ui, "輸出（預設值）", |ui| {
+            let d = &mut f.draft;
+            ui.checkbox(&mut d.export.auto, "處理完成後自動匯出");
+            theme::hint(ui, "新增轉錄時可以只改那一次；之後也能在每場會議的「匯出」頁用其他格式再匯出。");
+            ui.add_space(6.0);
+            crate::widgets::export_options(ui, &mut d.export, "settings_export", false, None);
         });
 
         theme::section(ui, "處理", |ui| {

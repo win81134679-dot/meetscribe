@@ -3,7 +3,7 @@
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use meetscribe_core::config::{AppPaths, LlmProvider, Settings};
-use meetscribe_core::export;
+use meetscribe_core::export::{self, ExportOptions};
 use meetscribe_core::model::{JobOptions, Project, ProjectStatus};
 use meetscribe_core::pipeline::{Engine, Event, EventSink, LogLevel};
 use meetscribe_core::secrets::ApiKeys;
@@ -130,17 +130,24 @@ fn find(store: &ProjectStore, id: &str) -> Result<Project> {
     }
 }
 
-fn do_export(p: &Project, settings: &Settings, formats: Option<&str>, out: Option<PathBuf>) -> Result<()> {
-    let ids: Vec<String> = match formats {
-        Some(f) => f
+/// 設定的輸出選項，套上命令列的 --formats／--out。
+fn export_options(settings: &Settings, formats: Option<&str>, out: Option<&PathBuf>) -> ExportOptions {
+    let mut o = settings.export.clone();
+    if let Some(f) = formats {
+        o.formats = f
             .split(',')
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
-            .collect(),
-        None => settings.export_formats.clone(),
-    };
-    let dir = out.unwrap_or_else(|| meetscribe_core::config::default_export_dir(settings, &p.source_file));
-    for f in export::export_all(p, &ids, &dir)? {
+            .collect();
+    }
+    if let Some(dir) = out {
+        o.dir = dir.display().to_string();
+    }
+    o
+}
+
+fn do_export(p: &Project, opts: &ExportOptions) -> Result<()> {
+    for f in export::export_project(p, opts)? {
         println!("{}", f.display());
     }
     Ok(())
@@ -223,6 +230,11 @@ async fn main() -> Result<()> {
                     .unwrap_or_default(),
                 generate_summary: !no_summary,
                 summary_instructions: instructions.unwrap_or_default(),
+                // 完成時由 Engine 依這份選項自動匯出
+                export: Some(ExportOptions {
+                    auto: true,
+                    ..export_options(&settings, formats.as_deref(), out.as_ref())
+                }),
             };
             let engine = Engine::from_settings(&paths, settings.clone(), ApiKeys::load()).await?;
             let cancel = cancel_on_ctrl_c();
@@ -242,7 +254,9 @@ async fn main() -> Result<()> {
                             p.usage.total_usd(),
                             &p.id.to_string()[..8]
                         );
-                        do_export(&p, &settings, formats.as_deref(), out.clone())?;
+                        for f in &p.exported {
+                            println!("{}", f.display());
+                        }
                     }
                     other => {
                         failed += 1;
@@ -284,7 +298,11 @@ async fn main() -> Result<()> {
         }
         Command::Export { id, formats, out } => {
             let p = find(&store, &id)?;
-            do_export(&p, &settings, formats.as_deref(), out)?;
+            let base = Settings {
+                export: p.options.export.clone().unwrap_or(settings.export.clone()),
+                ..settings
+            };
+            do_export(&p, &export_options(&base, formats.as_deref(), out.as_ref()))?;
         }
     }
     Ok(())

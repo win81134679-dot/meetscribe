@@ -1,4 +1,4 @@
-//! 新增轉錄：拖放區、檔案清單、選項、費用預估、開始（版型參考 Filee 首頁）。
+//! 新增轉錄：拖放區、檔案清單、選項、輸出、費用預估、開始（版型參考 Filee 首頁）。
 
 use crate::app::{MeetApp, View};
 use crate::theme::{self, icon, pal};
@@ -112,6 +112,7 @@ impl NewJobForm {
             keyterms: lines(&self.keyterms),
             generate_summary: self.generate_summary,
             summary_instructions: self.summary_instructions.trim().to_string(),
+            export: None,
         }
     }
 }
@@ -438,6 +439,21 @@ pub fn show(app: &mut MeetApp, ui: &mut egui::Ui) {
             }
         });
 
+        theme::section(ui, "輸出", |ui| {
+            // 跟摘要方式一樣，改了就記成下次的預設
+            let mut s = app.settings.clone();
+            let mut changed = ui.checkbox(&mut s.export.auto, "完成後自動匯出").changed();
+            if s.export.auto {
+                ui.add_space(4.0);
+                changed |= widgets::export_options(ui, &mut s.export, "job_export", true, None);
+            } else {
+                theme::hint(ui, "做完後到該場會議的「匯出」頁手動匯出。");
+            }
+            if changed {
+                app.apply_settings(s);
+            }
+        });
+
         ui.horizontal(|ui| {
             let total = app.new_job.total_seconds();
             if total > 0.0 {
@@ -468,7 +484,10 @@ pub fn show(app: &mut MeetApp, ui: &mut egui::Ui) {
 }
 
 fn start(app: &mut MeetApp) {
-    let options = app.new_job.options();
+    let options = JobOptions {
+        export: Some(app.settings.export.clone()),
+        ..app.new_job.options()
+    };
     let mut first = None;
     for f in std::mem::take(&mut app.new_job.files) {
         let mut p = Project::new(f, options.clone());

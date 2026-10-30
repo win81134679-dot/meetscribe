@@ -1,8 +1,9 @@
 //! 使用者設定與資料夾位置。API Key 不在這裡（見 [`crate::secrets`]）。
 
 use crate::Result;
+use crate::export::ExportOptions;
 use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 pub const DEFAULT_API_BASE: &str = "https://openrouter.ai/api/v1";
 pub const DEFAULT_STT_MODEL: &str = "nvidia/nemotron-3.5-transcribe";
@@ -85,9 +86,8 @@ pub struct Settings {
     pub claude_cli_path: String,
     /// ffmpeg.exe 所在資料夾或完整路徑；空白則自動尋找。
     pub ffmpeg_path: String,
-    /// 匯出預設資料夾；空白則放在原始錄音旁邊。
-    pub export_dir: String,
-    pub export_formats: Vec<String>,
+    /// 輸出（匯出）的預設值：格式、資料夾、檔名、內容、完成後自動匯出。新增轉錄時複製一份到專案。
+    pub export: ExportOptions,
     /// 介面字級倍率。
     pub ui_scale: f32,
 }
@@ -112,8 +112,7 @@ impl Default for Settings {
             summary_single_pass_chars: 300_000,
             deny_data_collection: false,
             ffmpeg_path: String::new(),
-            export_dir: String::new(),
-            export_formats: vec!["md".into(), "docx".into(), "srt".into()],
+            export: ExportOptions::default(),
             ui_scale: 1.0,
         }
     }
@@ -225,17 +224,6 @@ impl AppPaths {
     pub fn claude_workdir(&self) -> PathBuf {
         self.root.join("claude-work")
     }
-}
-
-/// 匯出資料夾：設定值優先，否則原始錄音所在資料夾。
-pub fn default_export_dir(settings: &Settings, source_file: &Path) -> PathBuf {
-    if !settings.export_dir.trim().is_empty() {
-        return PathBuf::from(settings.export_dir.trim());
-    }
-    source_file
-        .parent()
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| PathBuf::from("."))
 }
 
 #[cfg(test)]

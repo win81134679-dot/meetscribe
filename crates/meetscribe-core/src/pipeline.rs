@@ -6,6 +6,7 @@ use crate::attribution::{self, KnownSpeaker, ROSTER_LIMIT};
 use crate::audio::{self, Ffmpeg, NORMALIZED_EXT, NORMALIZED_FORMAT};
 use crate::claude_code::ClaudeCodeCli;
 use crate::config::{AppPaths, LlmProvider, Settings};
+use crate::export;
 use crate::gemini::{self, Gemini};
 use crate::model::{ChunkRecord, Project, ProjectStatus, Segment, Stage, SttResult, Timing};
 use crate::openrouter::{OpenRouter, SttCapabilities};
@@ -209,6 +210,9 @@ impl Engine {
 
     /// 跑完整流程（或從斷點續跑）。錯誤記在 `status`，不往外丟。
     pub async fn run(&self, mut project: Project, sink: EventSink, cancel: CancellationToken) -> Project {
+        // 已經完成、這次又沒有任何變動（例如再按一次續跑）就不重複匯出
+        let before = (project.status == ProjectStatus::Done)
+            .then(|| (project.segments.clone(), project.speakers.clone(), project.summary.clone()));
         project.status = ProjectStatus::Running;
         project.models.stt = self.transcriber.model().to_string();
         project.models.attribution = self.settings.attribution_model.clone();
@@ -225,6 +229,13 @@ impl Engine {
         project.status = match result {
             Ok(()) => {
                 project.stage = Stage::Done;
+                project.status = ProjectStatus::Done; // 匯出的 JSON 要記成完成
+                let unchanged = before.is_some_and(|(segments, speakers, summary)| {
+                    segments == project.segments && speakers == project.speakers && summary == project.summary
+                });
+                if !unchanged {
+                    self.auto_export(&mut project, &ctx);
+                }
                 ProjectStatus::Done
             }
             Err(Error::Cancelled) => {
@@ -240,6 +251,29 @@ impl Engine {
             tracing::error!("存檔失敗：{e}");
         }
         project
+    }
+
+    /// 依專案（或目前設定）的輸出選項匯出。失敗只記警告，不影響「完成」。
+    fn auto_export(&self, p: &mut Project, ctx: &Ctx<'_>) {
+        let opts = p.options.export.clone().unwrap_or_else(|| self.settings.export.clone());
+        if !opts.auto || opts.known_formats().is_empty() {
+            return;
+        }
+        match export::export_project(p, &opts) {
+            Ok(files) => {
+                ctx.log(
+                    p,
+                    LogLevel::Info,
+                    format!("已匯出 {} 個檔案到 {}", files.len(), opts.target_dir(p).display()),
+                );
+                p.exported = files;
+            }
+            Err(e) => {
+                let msg = format!("自動匯出失敗：{e}（可到「匯出」頁手動匯出）");
+                ctx.log(p, LogLevel::Warn, &msg);
+                p.warnings.push(msg);
+            }
+        }
     }
 
     async fn run_stages(&self, p: &mut Project, ctx: &Ctx<'_>) -> Result<()> {

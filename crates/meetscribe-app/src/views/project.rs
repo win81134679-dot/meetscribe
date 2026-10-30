@@ -6,12 +6,12 @@ use crate::widgets::{self, speaker_chip, speaker_color};
 use crate::worker::Cmd;
 use egui::{Margin, RichText, Stroke, Ui};
 use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
-use meetscribe_core::config::{Settings, default_export_dir};
-use meetscribe_core::export;
+use meetscribe_core::config::Settings;
+use meetscribe_core::export::{self, ExportOptions};
 use meetscribe_core::model::{NameSource, Project, ProjectStatus, Stage, Timing};
 use meetscribe_core::pipeline::LogLevel;
 use meetscribe_core::textutil::{fmt_clock, fmt_duration_zh};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use uuid::Uuid;
 
@@ -41,18 +41,16 @@ pub struct ProjectUi {
     summary_buf: String,
     regen_instructions: String,
     md_cache: CommonMarkCache,
-    export_formats: Option<HashSet<String>>,
-    export_dir: String,
+    /// 匯出頁正在編輯的選項（切換會議時清掉，改帶該會議自己的）。
+    export: Option<ExportOptions>,
     last_export: Vec<PathBuf>,
     title_buf: Option<String>,
 }
 
 impl ProjectUi {
     pub fn reset(&mut self) {
-        let formats = self.export_formats.take();
         let follow = self.follow_playback;
         *self = Self {
-            export_formats: formats,
             follow_playback: follow,
             ..Default::default()
         };
@@ -865,91 +863,71 @@ fn speakers_tab(ui: &mut Ui, p: &mut Project, st: &mut ProjectUi, editable: bool
 // ---------- 匯出 ----------
 
 fn export_tab(ui: &mut Ui, p: &Project, st: &mut ProjectUi, settings: &Settings, actions: &mut Vec<Action>) {
-    let pl = pal(ui);
-    let formats = st
-        .export_formats
-        .get_or_insert_with(|| settings.export_formats.iter().cloned().collect());
-    if st.export_dir.is_empty() {
-        st.export_dir = default_export_dir(settings, &p.source_file).display().to_string();
-    }
-    theme::section(ui, "格式", |ui| {
-        ui.columns(2, |cols| {
-            for (i, ex) in export::registry().into_iter().enumerate() {
-                let ui = &mut cols[i % 2];
-                let mut on = formats.contains(ex.id());
-                if ui
-                    .checkbox(&mut on, format!("{}（.{}）", ex.label(), ex.extension()))
-                    .changed()
-                {
-                    if on {
-                        formats.insert(ex.id().to_string());
-                    } else {
-                        formats.remove(ex.id());
-                    }
-                }
-            }
+    // 預設帶這場會議建立時的輸出選項（舊專案用目前設定）
+    let opts = st
+        .export
+        .get_or_insert_with(|| p.options.export.clone().unwrap_or_else(|| settings.export.clone()));
+    egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+        theme::section(ui, "匯出", |ui| {
+            widgets::export_options(ui, opts, "project_export", false, Some(p));
         });
-    });
-    theme::section(ui, "存到", |ui| {
         ui.horizontal(|ui| {
-            ui.add(egui::TextEdit::singleline(&mut st.export_dir).desired_width(ui.available_width() - 210.0));
-            if theme::button(ui, Some(icon::FOLDER), "選擇…").clicked()
-                && let Some(d) = rfd::FileDialog::new().set_directory(&st.export_dir).pick_folder()
-            {
-                st.export_dir = d.display().to_string();
-            }
-            if theme::button(ui, Some(icon::OPEN), "開啟").clicked() {
-                let _ = open::that(&st.export_dir);
-            }
-        });
-        theme::hint(ui, "檔名用會議名稱；同名檔案已存在時自動加 (2)、(3)，不會覆蓋。");
-    });
-    ui.horizontal(|ui| {
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if theme::primary(ui, Some(icon::DOWNLOAD), "匯出", !formats.is_empty()).clicked() {
-                actions.push(Action::Export);
-            }
-        });
-    });
-    if !st.last_export.is_empty() {
-        ui.add_space(10.0);
-        theme::section(ui, "已匯出", |ui| {
-            for f in &st.last_export {
-                ui.horizontal(|ui| {
-                    ui.label(theme::ic(icon::CHECK, 13.0).color(pl.success));
-                    ui.label(f.display().to_string());
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if theme::ghost(ui, Some(icon::OPEN), "開啟", Some(pl.accent_strong)).clicked() {
-                            let _ = open::that(f);
-                        }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let ready = !opts.known_formats().is_empty();
+                if theme::primary(ui, Some(icon::DOWNLOAD), "匯出", ready).clicked() {
+                    actions.push(Action::Export);
+                }
+                if theme::button(ui, Some(icon::OPEN), "開啟資料夾").clicked() {
+                    // 還沒匯出過時子資料夾不存在，改開上一層
+                    let dir = opts.target_dir(p);
+                    let _ = open::that(match dir.parent() {
+                        Some(parent) if !dir.is_dir() => parent.to_path_buf(),
+                        _ => dir,
                     });
-                });
-            }
+                }
+            });
         });
-    }
+        let (title, files) = if st.last_export.is_empty() {
+            ("處理完成時自動匯出的檔案", &p.exported)
+        } else {
+            ("已匯出", &st.last_export)
+        };
+        if !files.is_empty() {
+            ui.add_space(10.0);
+            exported_list(ui, title, files);
+        }
+    });
+}
+
+fn exported_list(ui: &mut Ui, title: &str, files: &[PathBuf]) {
+    let pl = pal(ui);
+    theme::section(ui, title, |ui| {
+        for f in files {
+            ui.horizontal(|ui| {
+                ui.label(theme::ic(icon::CHECK, 13.0).color(pl.success));
+                ui.label(f.display().to_string());
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if theme::ghost(ui, Some(icon::OPEN), "開啟", Some(pl.accent_strong)).clicked() {
+                        let _ = open::that(f);
+                    }
+                });
+            });
+        }
+    });
 }
 
 fn export_now(app: &mut MeetApp, id: Uuid) {
     app.save_now();
     let Some(p) = app.project(id).cloned() else { return };
-    let ids: Vec<String> = app
+    let opts = app
         .project_ui
-        .export_formats
+        .export
         .clone()
-        .unwrap_or_default()
-        .into_iter()
-        .collect();
-    let dir = PathBuf::from(app.project_ui.export_dir.trim());
-    match export::export_all(&p, &ids, &dir) {
+        .unwrap_or_else(|| p.options.export.clone().unwrap_or_else(|| app.settings.export.clone()));
+    match export::export_project(&p, &opts) {
         Ok(files) => {
             app.toast(format!("已匯出 {} 個檔案", files.len()), false);
             app.project_ui.last_export = files;
-            // 記住這次選的格式當預設
-            let mut s = app.settings.clone();
-            let mut sorted = ids.clone();
-            sorted.sort();
-            s.export_formats = sorted;
-            app.apply_settings(s);
         }
         Err(e) => app.toast(format!("匯出失敗：{e}"), true),
     }

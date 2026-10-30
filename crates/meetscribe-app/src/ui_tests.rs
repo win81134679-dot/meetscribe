@@ -111,4 +111,19 @@ fn render_screens() {
     shot(&mut harness, "08_dark_transcript");
     harness.state_mut().view = View::NewJob;
     shot(&mut harness, "09_dark_new_job");
+
+    // 長頁面整頁（輸出選項在折疊線以下）
+    harness.ctx.set_theme(egui::Theme::Light);
+    harness.set_size(egui::vec2(1280.0, 2000.0));
+    harness.state_mut().view = View::Settings;
+    shot(&mut harness, "10_settings_full");
+    harness.state_mut().view = View::NewJob;
+    shot(&mut harness, "11_new_job_full");
+    {
+        let st = harness.state_mut();
+        st.view = View::Project;
+        st.selected = Some(id);
+        st.project_ui.tab = Tab::Export;
+    }
+    shot(&mut harness, "12_export_full");
 }

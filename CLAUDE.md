@@ -26,7 +26,8 @@
 刻意不由 AI 建 `.lnk`：全域 CLAUDE.md〈防毒〉記過「claude.exe 建指向自編未簽章 exe 的捷徑」被 Bitdefender 判刑；要 `.lnk` 請使用者自己「傳送到桌面」。
 程式開著時 exe 被鎖住，`cargo build --release` 會失敗——先關視窗再建。
 
-擴充點：新供應商實作 `providers::Transcriber`／`LlmClient`，在 `Engine::from_settings` 接上；新匯出格式實作 `export::Exporter`，登記進 `export::registry()`。提示詞在 `prompts.rs`，使用者可用 `%APPDATA%\MeetScribe\prompts\<名稱>.md` 覆寫——`attribution`／`reconcile` 的 JSON 格式是程式解析的契約，改提示詞時保持格式。
+擴充點：新供應商實作 `providers::Transcriber`／`LlmClient`，在 `Engine::from_settings` 接上；新匯出格式實作 `export::Exporter`，登記進 `export::registry()`
+（會放摘要的格式讓 `has_summary()` 回 true，`ExportOptions` 的「內容」才對它有作用）。輸出選項的 UI 只有一份：`widgets::export_options`，設定頁、新增轉錄、匯出頁共用。提示詞在 `prompts.rs`，使用者可用 `%APPDATA%\MeetScribe\prompts\<名稱>.md` 覆寫——`attribution`／`reconcile` 的 JSON 格式是程式解析的契約，改提示詞時保持格式。
 
 ## 使用者定的費用分工（2026-10-30）
 

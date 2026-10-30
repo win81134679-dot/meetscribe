@@ -1,5 +1,6 @@
 //! 專案（一場會議）的資料模型。整份序列化成 `project.json`。
 
+use crate::export::ExportOptions;
 use chrono::{DateTime, Local};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -78,6 +79,8 @@ pub struct JobOptions {
     pub generate_summary: bool,
     /// 摘要的額外指示（例如「著重技術決策」）。
     pub summary_instructions: String,
+    /// 這場會議的輸出選項（建立時從設定複製）；`None` 用目前設定（舊專案）。
+    pub export: Option<ExportOptions>,
 }
 
 impl Default for JobOptions {
@@ -90,6 +93,7 @@ impl Default for JobOptions {
             keyterms: Vec::new(),
             generate_summary: true,
             summary_instructions: String::new(),
+            export: None,
         }
     }
 }
@@ -254,6 +258,9 @@ pub struct Project {
     pub models: ModelsUsed,
     #[serde(default)]
     pub warnings: Vec<String>,
+    /// 最近一次自動匯出寫出的檔案。
+    #[serde(default)]
+    pub exported: Vec<PathBuf>,
 }
 
 impl Project {
@@ -283,6 +290,7 @@ impl Project {
             usage: Usage::default(),
             models: ModelsUsed::default(),
             warnings: Vec::new(),
+            exported: Vec::new(),
         }
     }
 

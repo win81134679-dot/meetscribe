@@ -2,7 +2,7 @@
 
 use meetscribe_core::audio::Ffmpeg;
 use meetscribe_core::config::{AppPaths, LlmProvider, Settings};
-use meetscribe_core::export;
+use meetscribe_core::export::{self, Content, ExportOptions};
 use meetscribe_core::model::{JobOptions, Project, ProjectStatus, Timing};
 use meetscribe_core::pipeline::{Engine, Event, EventSink};
 use meetscribe_core::secrets::ApiKeys;
@@ -154,6 +154,11 @@ async fn full_pipeline_with_two_chunks() {
     };
     let options = JobOptions {
         participants: vec!["王經理".into()],
+        export: Some(ExportOptions {
+            formats: vec!["txt".into(), "md".into()],
+            content: Content::Separate,
+            ..Default::default()
+        }),
         ..Default::default()
     };
     let project = Project::new(source.clone(), options);
@@ -178,18 +183,36 @@ async fn full_pipeline_with_two_chunks() {
     assert_eq!(done.models.attribution, "gemini-3.8-flash");
     assert!(done.usage.llm_input_tokens >= 10_000, "Gemini 的 token 有記到");
 
+    // 完成時依專案的輸出選項自動匯出到錄音檔旁邊
+    let names: Vec<String> = done
+        .exported
+        .iter()
+        .map(|f| f.file_name().unwrap().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(
+        names,
+        ["預算會議 摘要.md", "預算會議 逐字稿.md", "預算會議 摘要.txt", "預算會議 逐字稿.txt"]
+    );
+    assert!(done.exported.iter().all(|f| f.parent() == Some(tmp.path()) && f.is_file()));
+
     // 存檔可重新讀回，並可匯出所有格式
     let reloaded = engine.store.load(done.id).unwrap();
     assert_eq!(reloaded, done);
-    let ids: Vec<String> = export::registry().iter().map(|e| e.id().to_string()).collect();
-    let written = export::export_all(&done, &ids, &tmp.path().join("out")).unwrap();
-    assert_eq!(written.len(), ids.len());
+    let all = ExportOptions {
+        formats: export::registry().iter().map(|e| e.id().to_string()).collect(),
+        dir: tmp.path().join("out").display().to_string(),
+        ..Default::default()
+    };
+    let written = export::export_project(&done, &all).unwrap();
+    assert_eq!(written.len(), all.formats.len());
 
-    // 再跑一次（續跑）不應重送任何請求
+    // 再跑一次（續跑）不應重送任何請求，也不重複匯出
     let before = server.received_requests().await.unwrap().len();
     let again = engine.run(reloaded, Arc::new(|_| {}), CancellationToken::new()).await;
     assert_eq!(again.status, ProjectStatus::Done);
     assert_eq!(server.received_requests().await.unwrap().len(), before);
+    assert_eq!(again.exported, done.exported);
+    assert!(!tmp.path().join("預算會議 逐字稿 (2).txt").exists());
 
     let ev = events.lock().unwrap();
     assert!(ev.iter().any(|e| matches!(e, Event::Progress { .. })));
