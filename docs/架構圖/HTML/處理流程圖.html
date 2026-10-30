@@ -76,7 +76,7 @@
 <text x="82" y="231" class="t-tag" fill="#3949ab" text-anchor="middle">01</text>
 <text x="160" y="262" class="t-name" fill="#14213d" text-anchor="middle">前處理</text>
 <text x="160" y="284" class="t-sub" fill="#44506b" text-anchor="middle">轉成 16 kHz 單聲道</text>
-<text x="160" y="304" class="t-sub" fill="#44506b" text-anchor="middle">在停頓處切成約 20 分鐘一段</text>
+<text x="160" y="304" class="t-sub" fill="#44506b" text-anchor="middle">在停頓處切成約 10 分鐘一段</text>
 
 <!-- 階段 02 轉錄 -->
 <rect x="304" y="216" width="192" height="112" rx="6" fill="#f4f7fb"/>
@@ -85,7 +85,7 @@
 <text x="322" y="231" class="t-tag" fill="#3949ab" text-anchor="middle">02</text>
 <text x="400" y="262" class="t-name" fill="#14213d" text-anchor="middle">轉錄</text>
 <text x="400" y="284" class="t-sub" fill="#44506b" text-anchor="middle">各段同時送出</text>
-<text x="400" y="304" class="t-sub" fill="#44506b" text-anchor="middle">限流或斷線自動重試</text>
+<text x="400" y="304" class="t-sub" fill="#44506b" text-anchor="middle">逾時（524）自動對半切再送</text>
 
 <!-- 階段 03 說話者 -->
 <rect x="544" y="216" width="192" height="112" rx="6" fill="#f4f7fb"/>
@@ -111,7 +111,7 @@
 <rect x="1032" y="222" width="20" height="12" rx="2" fill="none" stroke="#3949ab" stroke-opacity="0.6" stroke-width="0.8"/>
 <text x="1042" y="231" class="t-tag" fill="#3949ab" text-anchor="middle">05</text>
 <text x="1120" y="262" class="t-name" fill="#14213d" text-anchor="middle">核對與匯出</text>
-<text x="1120" y="284" class="t-sub" fill="#44506b" text-anchor="middle">改字、改說話者、合併</text>
+<text x="1120" y="284" class="t-sub" fill="#44506b" text-anchor="middle">完成即自動匯出，可再改再匯</text>
 <text x="1120" y="304" class="t-mono" fill="#44506b" text-anchor="middle">docx · md · srt · vtt …</text>
 
 <!-- 工具：ffmpeg（外部，灰藍） -->
