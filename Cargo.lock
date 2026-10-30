@@ -2790,7 +2790,7 @@ checksum = "dae608c151f68243f2b000364e1f7b186d9c29845f7d2d85bd31b9ad77ad552b"
 
 [[package]]
 name = "meetscribe-app"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "chrono",
  "eframe",
@@ -2812,7 +2812,7 @@ dependencies = [
 
 [[package]]
 name = "meetscribe-cli"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -2825,7 +2825,7 @@ dependencies = [
 
 [[package]]
 name = "meetscribe-core"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "async-trait",
  "base64 0.23.1",

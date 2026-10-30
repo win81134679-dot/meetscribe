@@ -19,9 +19,22 @@
 
 A2 橫式 300 DPI；同名向量 PDF 在 `docs/架構圖/PDF/`，原始檔在 `docs/架構圖/HTML/`。
 
+## 安裝
+
+到 [Releases](https://github.com/win81134679-dot/meetscribe/releases) 下載 **`MeetScribe-Setup-v<版本>.exe`** 執行：
+
+- 只裝給目前的 Windows 帳號（`%LOCALAPPDATA%\Programs\MeetScribe`），不需要系統管理員。
+- 開始功能表會有「MeetScribe 會議逐字稿」，安裝時可勾選在桌面也建一個。
+- 電腦上找不到 ffmpeg 時，最後一頁會多一個「安裝 ffmpeg」的勾選（用 winget 下載，約 100 MB）。
+- 程式沒有數位簽章，第一次執行 Windows 可能跳出「Windows 已保護您的電腦」：按「其他資訊」→「仍要執行」。
+- 解除安裝在「設定 → 應用程式」。會議資料（`%APPDATA%\MeetScribe`）與金鑰（Windows 認證管理員）會保留，重新安裝後還在。
+
+自己從原始碼建安裝程式：先關掉 MeetScribe，再跑 `powershell -ExecutionPolicy Bypass -File installer\build-installer.ps1`
+（需要 Rust 與 [Inno Setup 6](https://jrsoftware.org/isinfo.php)，產出在 `dist\`）。
+
 ## 需要準備
 
-1. **ffmpeg**：`winget install Gyan.FFmpeg`（程式會自己找；找不到可在設定指定位置）。
+1. **ffmpeg**：安裝程式會幫你裝；自己裝用 `winget install Gyan.FFmpeg`（程式會自己找；找不到可在設定指定位置）。
 2. **OpenRouter 帳戶**（必要，逐字稿用）：[儲值](https://openrouter.ai/settings/credits)、[建立 API Key](https://openrouter.ai/settings/keys)。程式的「新增轉錄」頁有按鈕直接帶你去。
 3. **Google AI Studio API Key**（建議，免費）：<https://aistudio.google.com/apikey>。
 4. **Claude Code**（選用）：要用它寫摘要時，先在終端機登入過一次 `claude`。
@@ -30,7 +43,7 @@ A2 橫式 300 DPI；同名向量 PDF 在 `docs/架構圖/PDF/`，原始檔在 `d
 
 ## 使用
 
-1. 雙擊專案資料夾裡的 **`開啟 MeetScribe.cmd`**（或直接開 `target\release\meetscribe-app.exe`）。程式一律從「新增轉錄」頁開始。
+1. 從開始功能表開「MeetScribe 會議逐字稿」；用原始碼的話雙擊專案資料夾裡的 **`開啟 MeetScribe.cmd`**（或直接開 `target\release\meetscribe-app.exe`）。程式一律從「新增轉錄」頁開始。
    想放到桌面：在 `target\release\meetscribe-app.exe` 上按右鍵 →「傳送到」→「桌面（建立捷徑）」。
 2. 第一次使用，「新增轉錄」頁最上面會有三個步驟，照著按就好：
    ① **開啟 OpenRouter 儲值頁**儲值（頁面會顯示儲值 US$5 約可轉幾小時）→
