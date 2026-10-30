@@ -1,0 +1,21 @@
+[package]
+name = "meetscribe-android"
+version = "1.0.0"
+edition = "2024"
+description = "MeetScribe Android 版的 JNI 橋：Kotlin 介面 ⇄ meetscribe-core"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+meetscribe-core = { path = "../meetscribe-core", version = "1.0.0", features = ["native-audio"] }
+jni = "0.21.1"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+tokio-util = "0.7.20"
+uuid = { version = "1.29.0", features = ["v4", "serde"] }
+chrono = "0.4.45"
+
+[dev-dependencies]
+tempfile = "3.27.0"

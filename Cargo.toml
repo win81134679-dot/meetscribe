@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/meetscribe-core", "crates/meetscribe-app", "crates/meetscribe-cli"]
+members = ["crates/meetscribe-core", "crates/meetscribe-app", "crates/meetscribe-cli", "crates/meetscribe-android"]
 
 [workspace.package]
 version = "1.0.0"
@@ -14,3 +14,7 @@ lto = "thin"
 # 這台機器的分頁檔偏小，debug 符號會讓 rustc 在大型相依（windows、wgpu）上記憶體不足
 [profile.dev]
 debug = 0
+
+# Windows 主機交叉編譯到 Android 時，上游 mp3lame-sys 的 build.rs 拿不到 cc（見 third_party/mp3lame-sys/build.rs）
+[patch.crates-io]
+mp3lame-sys = { path = "third_party/mp3lame-sys" }

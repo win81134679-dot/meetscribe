@@ -5,7 +5,7 @@ use meetscribe_core::audio::Ffmpeg;
 use meetscribe_core::config::{AppPaths, Settings};
 use meetscribe_core::gemini::Gemini;
 use meetscribe_core::model::{Project, ProjectStatus};
-use meetscribe_core::openrouter::{KeyInfo, ModelInfo, OpenRouter, SttCapabilities};
+use meetscribe_core::openrouter::{ModelInfo, OpenRouter, SttCapabilities};
 use meetscribe_core::pipeline::{Engine, Event, EventSink};
 use meetscribe_core::secrets::{ApiKeys, KeyKind};
 use std::collections::HashMap;
@@ -178,7 +178,7 @@ fn handle(shared: &Arc<Shared>, job_tx: &tmpsc::UnboundedSender<Job>, cmd: Cmd) 
         Cmd::TestKey(kind) => {
             let shared = shared.clone();
             tokio::spawn(async move {
-                let result = test_key(&shared.settings(), kind).await;
+                let result = meetscribe_core::account::test_key(&shared.settings(), kind).await;
                 shared.send(Msg::KeyTest { kind, result });
             });
         }
@@ -317,36 +317,5 @@ async fn fetch_stt_caps(shared: Arc<Shared>) {
         && let Ok(caps) = c.stt_capabilities(&s.stt_model).await
     {
         shared.send(Msg::SttCaps(caps));
-    }
-}
-
-async fn test_key(settings: &Settings, kind: KeyKind) -> Result<String, String> {
-    let Some((key, _)) = meetscribe_core::secrets::load(kind) else {
-        return Err(format!("尚未設定 {}", kind.label()));
-    };
-    match kind {
-        KeyKind::OpenRouter => {
-            let c = OpenRouter::new(settings, key).map_err(|e| e.to_string())?;
-            let info: KeyInfo = c.key_info().await.map_err(|e| e.to_string())?;
-            let mut s = String::from("金鑰有效");
-            if let Some(c) = info.credits_remaining {
-                s.push_str(&format!("，帳戶餘額 US${c:.2}"));
-            }
-            if let Some(r) = info.limit_remaining {
-                s.push_str(&format!("，此金鑰剩餘額度 US${r:.2}"));
-            }
-            s.push_str(&format!("，累計用量 US${:.2}", info.usage));
-            Ok(s)
-        }
-        KeyKind::Google => {
-            let g = Gemini::new(settings, key).map_err(|e| e.to_string())?;
-            let models = g.list_models().await.map_err(|e| e.to_string())?;
-            let pick = meetscribe_core::gemini::pick_audio_model(&settings.attribution_model, &models);
-            Ok(format!(
-                "金鑰有效，可用 {} 個模型；說話者分配將使用 {}",
-                models.len(),
-                pick.unwrap_or_else(|| "（找不到 Flash 模型）".into())
-            ))
-        }
     }
 }

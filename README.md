@@ -1,6 +1,6 @@
 # MeetScribe 會議逐字稿
 
-會議錄音（或影片）→ **完整逐字稿（標出誰說的）＋ 依內容決定格式的會議摘要**。Windows 桌面程式，Rust 寫成。
+會議錄音（或影片）→ **完整逐字稿（標出誰說的）＋ 依內容決定格式的會議摘要**。Windows 桌面程式與 **Android App**，核心以 Rust 寫成、兩邊共用。
 
 | 工作 | 預設用什麼 | 費用 |
 |---|---|---|
@@ -61,6 +61,30 @@ A2 橫式 300 DPI；同名向量 PDF 在 `docs/架構圖/PDF/`，原始檔在 `d
    - **逐字稿**：點時間從那裡播放；點說話者改成別人；點文字修改、合併上一句、刪除。搜尋、依說話者篩選、跟隨播放。
    - **說話者**：改名（標「推測」的是模型判斷的，請核對）、把被拆開的同一人合併、聽聲音樣本、重新辨識。
    - **匯出**：處理完成就依「輸出」選項自動匯出；改了逐字稿或說話者之後，到「匯出」頁再匯出一次。
+
+## Android 版
+
+安裝檔是 **`MeetScribe-Android-v<版本>.apk`**（建置後在 `dist\`；有附在 [Releases](https://github.com/win81134679-dot/meetscribe/releases) 的版本也可從那裡下載）。
+複製到手機（LINE 傳給自己、雲端硬碟、USB 都可以）後開啟安裝
+（第一次會問「允許安裝不明來源的應用程式」，對下載它的 App 允許一次即可）。需要 Android 8.0 以上、64 位元 ARM 手機（近年的手機都是）。
+
+用法跟電腦版相同：開啟後在「新增轉錄」照三步驟設定 OpenRouter → 「選擇錄音檔」→「開始轉錄」。另外可以：
+
+- 在錄音機、LINE 等 App 對錄音按「分享」或「開啟方式」→ 選 MeetScribe，直接帶進新增轉錄。
+- 處理時可以切到別的 App 或關螢幕：通知列會顯示進度，做完自動匯出。被系統中斷就到該場會議按「從中斷處續跑」。
+- 匯出檔存在 App 的匯出資料夾；在「匯出」分頁按「分享」存到雲端硬碟、傳給別人或寄信，按 ↗ 用其他 App 開啟。
+
+跟電腦版的差異：
+
+| | 電腦版 | Android 版 |
+|---|---|---|
+| 音訊處理 | ffmpeg | 內建（不用另外裝）；Opus、AMR 等格式由手機系統解碼 |
+| 金鑰存放 | Windows 認證管理員 | App 私有空間（其他 App 讀不到，解除安裝就清掉） |
+| 摘要改用本機 Claude Code CLI | 可 | 無（手機沒有） |
+| 自訂提示詞 | `%APPDATA%\MeetScribe\prompts\` | 用內建提示詞 |
+| 一次匯入多個檔 | 可（拖進視窗） | 一次一個 |
+
+會議資料不會在電腦與手機之間同步；兩邊各自需要設定金鑰。
 
 ## 輸出選項
 
@@ -123,6 +147,21 @@ meetscribe-cli export 1a2b3c4d --formats docx --out D:\會議記錄
 cargo build --release          # 產出 target\release\meetscribe-app.exe、meetscribe-cli.exe
 cargo test --workspace         # 單元＋端對端（需 ffmpeg）＋離屏 UI 渲染
 cargo test -p meetscribe-core --test claude_cli_live -- --ignored   # 實際呼叫本機 Claude Code
+cargo test -p meetscribe-core -p meetscribe-android --features meetscribe-core/native-audio   # Android 用的音訊後端與 JNI 橋（在電腦上跑）
 ```
+
+### Android APK
+
+需要：Android Studio（用它附的 JDK）、Android SDK 的 **NDK 28.2**、platform 37／build-tools 36、rustup 的 `aarch64-linux-android` target。
+
+```powershell
+powershell -ExecutionPolicy Bypass -File android\build-apk.ps1            # 正式版 → dist\MeetScribe-Android-v<版本>.apk
+powershell -ExecutionPolicy Bypass -File android\build-apk.ps1 -Debug -Abis arm64-v8a,x86_64   # 給電腦上的模擬器測試
+```
+
+正式版要簽章金鑰 `android\keystore\meetscribe-release.jks` 與密碼檔 `android\keystore.properties`（都不進版控）。
+**這兩個檔一定要另外備份**：遺失之後就不能再發佈「同一個 App」的更新（使用者得先解除安裝才能裝新版）。
+沒有的話用 JDK 的 `keytool -genkeypair -keystore android\keystore\meetscribe-release.jks -alias meetscribe -keyalg RSA -keysize 4096 -validity 36500`
+產生，再照 `android\app\build.gradle.kts` 開頭的欄位寫 `keystore.properties`。
 
 架構與擴充方式見 `CLAUDE.md`，設計決定與進度見 `PLAN.md`。

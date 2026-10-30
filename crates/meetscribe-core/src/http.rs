@@ -6,11 +6,27 @@ use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
 pub fn client(timeout_secs: u64) -> Result<reqwest::Client> {
-    Ok(reqwest::Client::builder()
+    let b = reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(20))
         .timeout(Duration::from_secs(timeout_secs))
-        .user_agent(concat!("MeetScribe/", env!("CARGO_PKG_VERSION")))
-        .build()?)
+        .user_agent(concat!("MeetScribe/", env!("CARGO_PKG_VERSION")));
+    #[cfg(target_os = "android")]
+    let b = b.tls_backend_preconfigured(android_tls());
+    Ok(b.build()?)
+}
+
+/// Android：rustls（ring）＋內建 Mozilla 根憑證。不用 rustls-platform-verifier，免得還要在 Kotlin 端初始化 JNI。
+#[cfg(target_os = "android")]
+fn android_tls() -> rustls::ClientConfig {
+    let mut roots = rustls::RootCertStore::empty();
+    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    let mut cfg = rustls::ClientConfig::builder_with_provider(std::sync::Arc::new(rustls::crypto::ring::default_provider()))
+        .with_safe_default_protocol_versions()
+        .expect("ring 支援預設 TLS 版本")
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    cfg.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+    cfg
 }
 
 /// 送出請求（`build` 每次重試都會重新建立），可重試的錯誤依 Retry-After 或指數退避。

@@ -403,3 +403,96 @@ async fn cancel_marks_project_resumable() {
     assert_eq!(p.status, ProjectStatus::Cancelled);
     assert!(p.status.is_resumable());
 }
+
+/// 跟 [`full_pipeline_with_two_chunks`] 同一套流程，但音訊全程走 Android 用的內建後端（不叫 ffmpeg）：
+/// 16 kHz 測試音直接用 Rust 寫成 WAV → 轉 MP3、找停頓切段、剪聲音樣本都由 symphonia＋LAME 完成。
+#[cfg(feature = "native-audio")]
+#[tokio::test(flavor = "multi_thread")]
+async fn full_pipeline_with_native_audio_backend() {
+    use meetscribe_core::audio::AudioTool;
+    use meetscribe_core::audio_native::NativeAudio;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let paths = AppPaths::at(tmp.path().join("home"));
+    paths.ensure().unwrap();
+    // 300 秒 300 Hz，115～118、235～238 秒靜音（同 make_audio）
+    let source = tmp.path().join("手機錄音.wav");
+    {
+        let rate = 16_000u32;
+        let mut data = Vec::with_capacity(rate as usize * 300 * 2);
+        for i in 0..rate * 300 {
+            let t = i as f64 / rate as f64;
+            let silent = (115.0..118.0).contains(&t) || (235.0..238.0).contains(&t);
+            let v = if silent { 0.0 } else { (t * 300.0 * std::f64::consts::TAU).sin() * 0.5 };
+            data.extend(((v * 32767.0) as i16).to_le_bytes());
+        }
+        let mut f = Vec::new();
+        f.extend(b"RIFF");
+        f.extend((36 + data.len() as u32).to_le_bytes());
+        f.extend(b"WAVEfmt ");
+        f.extend(16u32.to_le_bytes());
+        f.extend(1u16.to_le_bytes());
+        f.extend(1u16.to_le_bytes());
+        f.extend(rate.to_le_bytes());
+        f.extend((rate * 2).to_le_bytes());
+        f.extend(2u16.to_le_bytes());
+        f.extend(16u16.to_le_bytes());
+        f.extend(b"data");
+        f.extend((data.len() as u32).to_le_bytes());
+        f.extend(data);
+        std::fs::write(&source, f).unwrap();
+    }
+
+    let server = mock_openrouter().await;
+    let settings = Settings {
+        api_base: server.uri(),
+        google_api_base: format!("{}/gemini", server.uri()),
+        attribution_provider: LlmProvider::Google,
+        attribution_model: "gemini-3.8-flash".into(),
+        summary_provider: LlmProvider::OpenRouter,
+        summary_model: "nvidia/nemotron-3-ultra-550b-a55b:free".into(),
+        chunk_minutes: 2,
+        max_retries: 2,
+        ..Default::default()
+    };
+    let keys = ApiKeys {
+        openrouter: "sk-test".into(),
+        google: Some("AIza-test".into()),
+    };
+    let Ok(mut engine) = Engine::from_settings(&paths, settings, keys).await else {
+        eprintln!("略過：桌面建立引擎需要 ffmpeg");
+        return;
+    };
+    engine.audio = AudioTool::Native(NativeAudio);
+
+    let options = JobOptions {
+        participants: vec!["王經理".into()],
+        export: Some(ExportOptions {
+            formats: vec!["docx".into(), "srt".into()],
+            dir: tmp.path().join("exports").display().to_string(),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let done = engine
+        .run(Project::new(source, options), Arc::new(|_| {}), CancellationToken::new())
+        .await;
+
+    assert_eq!(done.status, ProjectStatus::Done, "warnings: {:?}", done.warnings);
+    assert!((done.duration - 300.0).abs() < 0.5, "長度 {}", done.duration);
+    assert_eq!(done.chunks.len(), 2, "應在 115～118 秒的停頓切成兩段");
+    assert!((done.chunks[0].end - 116.5).abs() < 0.5, "切點 {}", done.chunks[0].end);
+    // 每段都是讀得回來、長度對的 MP3
+    for c in &done.chunks {
+        let f = engine.store.path_in(done.id, &c.file);
+        let d = NativeAudio.probe_duration(&f).await.unwrap();
+        assert!((d - c.duration()).abs() < 0.5, "{}：{d} vs {}", c.file, c.duration());
+    }
+    assert_eq!(done.segments.len(), 6);
+    assert_eq!(done.speakers.len(), 1);
+    let clip = done.speakers[0].sample_clip.as_ref().expect("聲音樣本");
+    assert!(engine.store.path_in(done.id, clip).metadata().unwrap().len() > 1000);
+    assert!(done.summary.is_some());
+    assert_eq!(done.exported.len(), 2);
+    assert!(done.exported.iter().all(|f| f.starts_with(tmp.path().join("exports")) && f.is_file()));
+}

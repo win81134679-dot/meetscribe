@@ -1,0 +1,25 @@
+# mp3lame-sys 0.1.11 的修改版（MeetScribe）：只留 libmp3lame 原始碼，build.rs 一律用 cc 編。
+# 原因見 build.rs 開頭。由根 Cargo.toml 的 [patch.crates-io] 套用。授權沿用上游 LGPL-3.0（LAME 為 LGPL）。
+[package]
+edition = "2021"
+name = "mp3lame-sys"
+version = "0.1.11"
+build = "build.rs"
+description = "Bindings to mp3lame library (MeetScribe patched build)"
+license = "LGPL-3.0"
+publish = false
+
+[features]
+decoder = []
+target_host = []
+
+[lib]
+name = "mp3lame_sys"
+path = "src/lib.rs"
+
+[dependencies.libc]
+version = "0.2"
+default-features = false
+
+[build-dependencies]
+cc = "1.0.77"

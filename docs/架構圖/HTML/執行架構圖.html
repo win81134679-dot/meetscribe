@@ -27,7 +27,7 @@
 <div class="diagram-container">
 <svg viewBox="0 0 1280 904" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="ms-arch-title ms-arch-desc">
 <title id="ms-arch-title">MeetScribe 執行架構圖</title>
-<desc id="ms-arch-desc">使用者把錄音拖進 MeetScribe 桌面程式，處理流程在本機用 ffmpeg 轉檔切段、存專案資料；逐字稿送 OpenRouter 上付費的 Nemotron 3.5 Transcribe，說話者分配、整合與摘要預設用 Google AI Studio 的 Gemini 免費額度，沒有 Google Key 時改用 OpenRouter 免費模型，摘要也可手動改用本機 Claude Code CLI。</desc>
+<desc id="ms-arch-desc">使用者把錄音拖進 MeetScribe 桌面程式，或在 Android App 選擇、分享錄音；兩邊共用同一個 Rust 處理核心，在本機轉檔切段（電腦用 ffmpeg，手機用內建解碼與 MP3 編碼）、存專案資料；逐字稿送 OpenRouter 上付費的 Nemotron 3.5 Transcribe，說話者分配、整合與摘要預設用 Google AI Studio 的 Gemini 免費額度，沒有 Google Key 時改用 OpenRouter 免費模型，摘要在電腦版也可手動改用本機 Claude Code CLI。</desc>
 <defs>
 <marker id="ms-arch-arr-in" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#2196f3"/></marker>
 <marker id="ms-arch-arr-proc" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#3949ab"/></marker>
@@ -36,13 +36,13 @@
 
 <!-- 背景與標題 -->
 <rect width="100%" height="100%" fill="#f4f7fb"/>
-<text x="40" y="56" class="t-eyebrow" fill="#44506b">架構圖 · MeetScribe 會議逐字稿（Rust 桌面程式）</text>
+<text x="40" y="56" class="t-eyebrow" fill="#44506b">架構圖 · MeetScribe 會議逐字稿（Rust 桌面程式＋ Android App，共用核心）</text>
 <text x="40" y="112" class="t-title" fill="#14213d">只有逐字稿這一步付費，說話者與摘要走免費模型</text>
 
 <!-- 區塊（最先畫） -->
 <rect x="296" y="160" width="568" height="528" rx="8" fill="#14213d" fill-opacity="0.02" stroke="#14213d" stroke-opacity="0.10" stroke-width="0.8"/>
-<text x="312" y="184" class="t-zone" fill="#56627c">你的電腦 · Windows</text>
-<text x="848" y="184" class="t-mono" fill="#56627c" text-anchor="end">target\release\meetscribe-app.exe</text>
+<text x="312" y="184" class="t-zone" fill="#56627c">你的電腦或手機 · Windows／Android</text>
+<text x="848" y="184" class="t-mono" fill="#56627c" text-anchor="end">meetscribe-app.exe · .apk</text>
 <rect x="896" y="160" width="336" height="528" rx="8" fill="#14213d" fill-opacity="0.02" stroke="#14213d" stroke-opacity="0.10" stroke-width="0.8" stroke-dasharray="5,4"/>
 <text x="912" y="184" class="t-zone" fill="#56627c">雲端 API</text>
 
@@ -58,7 +58,7 @@
 
 <!-- 連線標籤（遮罩在線外，留 8px） -->
 <rect x="268" y="244" width="48" height="16" rx="2" fill="#f4f7fb"/>
-<text x="292" y="256" class="t-lbl" fill="#1a75be" text-anchor="middle">拖放</text>
+<text x="292" y="256" class="t-lbl" fill="#1a75be" text-anchor="middle">匯入</text>
 <rect x="548" y="218" width="48" height="16" rx="2" fill="#f4f7fb"/>
 <text x="572" y="230" class="t-lbl" fill="#3949ab" text-anchor="middle">排隊</text>
 <rect x="851" y="218" width="56" height="16" rx="2" fill="#f4f7fb"/>
@@ -72,7 +72,7 @@
 <rect x="72" y="222" width="32" height="12" rx="2" fill="none" stroke="#2196f3" stroke-opacity="0.6" stroke-width="0.8"/>
 <text x="88" y="231" class="t-tag" fill="#1663a0" text-anchor="middle">USER</text>
 <text x="164" y="258" class="t-name" fill="#14213d" text-anchor="middle">使用者</text>
-<text x="164" y="280" class="t-sub" fill="#44506b" text-anchor="middle">拖放錄音或影片檔</text>
+<text x="164" y="280" class="t-sub" fill="#44506b" text-anchor="middle">拖放、選擇或分享錄音檔</text>
 <text x="164" y="300" class="t-sub" fill="#44506b" text-anchor="middle">核對逐字稿、改說話者</text>
 
 <!-- 節點：桌面程式（處理，靛） -->
@@ -80,9 +80,9 @@
 <rect x="320" y="216" width="224" height="104" rx="6" fill="#c7cde8" stroke="#3949ab" stroke-width="1.2"/>
 <rect x="328" y="222" width="28" height="12" rx="2" fill="none" stroke="#3949ab" stroke-opacity="0.6" stroke-width="0.8"/>
 <text x="342" y="231" class="t-tag" fill="#3949ab" text-anchor="middle">APP</text>
-<text x="432" y="258" class="t-name" fill="#14213d" text-anchor="middle">MeetScribe 桌面程式</text>
-<text x="432" y="280" class="t-mono" fill="#44506b" text-anchor="middle">meetscribe-app · egui</text>
-<text x="432" y="300" class="t-sub" fill="#44506b" text-anchor="middle">批次用 meetscribe-cli，同一套</text>
+<text x="432" y="258" class="t-name" fill="#14213d" text-anchor="middle">MeetScribe 電腦＋手機</text>
+<text x="432" y="280" class="t-mono" fill="#44506b" text-anchor="middle">egui ／ Kotlin+Compose</text>
+<text x="432" y="300" class="t-sub" fill="#44506b" text-anchor="middle">手機經 JNI 用同一核心；另有 CLI</text>
 
 <!-- 節點：處理流程（處理，靛） -->
 <rect x="600" y="216" width="240" height="104" rx="6" fill="#f4f7fb"/>
@@ -98,9 +98,9 @@
 <rect x="600" y="408" width="240" height="88" rx="6" fill="#d6dee4" stroke="#78909c" stroke-width="1.2"/>
 <rect x="608" y="414" width="24" height="12" rx="2" fill="none" stroke="#78909c" stroke-opacity="0.6" stroke-width="0.8"/>
 <text x="620" y="423" class="t-tag" fill="#4f5f67" text-anchor="middle">EXT</text>
-<text x="720" y="446" class="t-name" fill="#14213d" text-anchor="middle">ffmpeg</text>
-<text x="720" y="466" class="t-mono" fill="#44506b" text-anchor="middle">16 kHz mono · silencedetect</text>
-<text x="720" y="484" class="t-sub" fill="#44506b" text-anchor="middle">轉檔、在停頓處切段</text>
+<text x="720" y="446" class="t-name" fill="#14213d" text-anchor="middle">ffmpeg ／ 內建音訊</text>
+<text x="720" y="466" class="t-mono" fill="#44506b" text-anchor="middle">16 kHz mono · symphonia+LAME</text>
+<text x="720" y="484" class="t-sub" fill="#44506b" text-anchor="middle">轉檔、在停頓處切段（手機用內建）</text>
 
 <!-- 節點：本機資料（儲存，青） -->
 <rect x="320" y="408" width="224" height="88" rx="6" fill="#f4f7fb"/>
@@ -108,8 +108,8 @@
 <rect x="328" y="414" width="32" height="12" rx="2" fill="none" stroke="#00897b" stroke-opacity="0.6" stroke-width="0.8"/>
 <text x="344" y="423" class="t-tag" fill="#00685d" text-anchor="middle">DATA</text>
 <text x="432" y="446" class="t-name" fill="#14213d" text-anchor="middle">本機資料</text>
-<text x="432" y="466" class="t-mono" fill="#44506b" text-anchor="middle">%APPDATA%\MeetScribe</text>
-<text x="432" y="484" class="t-sub" fill="#44506b" text-anchor="middle">專案與音訊；金鑰在認證管理員</text>
+<text x="432" y="466" class="t-mono" fill="#44506b" text-anchor="middle">%APPDATA% ／ App 私有空間</text>
+<text x="432" y="484" class="t-sub" fill="#44506b" text-anchor="middle">專案與音訊；金鑰另外存放</text>
 
 <!-- 節點：Claude Code CLI（可選，黃虛線） -->
 <rect x="320" y="560" width="224" height="88" rx="6" fill="#f4f7fb"/>
@@ -118,7 +118,7 @@
 <text x="342" y="575" class="t-tag" fill="#836417" text-anchor="middle">OPT</text>
 <text x="432" y="598" class="t-name" fill="#14213d" text-anchor="middle">Claude Code CLI</text>
 <text x="432" y="618" class="t-mono" fill="#44506b" text-anchor="middle">claude -p</text>
-<text x="432" y="636" class="t-sub" fill="#44506b" text-anchor="middle">手動切換時改由它寫摘要</text>
+<text x="432" y="636" class="t-sub" fill="#44506b" text-anchor="middle">電腦版手動切換時改由它寫摘要</text>
 
 <!-- 節點：Nemotron（焦點，橘） -->
 <rect x="920" y="216" width="288" height="104" rx="6" fill="#f4f7fb"/>

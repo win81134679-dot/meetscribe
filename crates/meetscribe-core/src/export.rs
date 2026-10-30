@@ -248,8 +248,17 @@ fn turns(project: &Project, opts: &ExportOptions) -> Vec<(f64, String, String)> 
 }
 
 fn meta_lines(project: &Project) -> Vec<String> {
+    // Android 的原始檔是 App 內部的匯入副本，完整路徑對使用者沒意義，只留檔名
+    #[cfg(target_os = "android")]
+    let source = project
+        .source_file
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    #[cfg(not(target_os = "android"))]
+    let source = project.source_file.display().to_string();
     let mut v = vec![
-        format!("原始檔案：{}", project.source_file.display()),
+        format!("原始檔案：{source}"),
         format!("長度：{}", fmt_duration_zh(project.duration)),
         format!("建立時間：{}", project.created_at.format("%Y-%m-%d %H:%M")),
     ];

@@ -436,7 +436,9 @@ impl Project {
 pub fn needs_space(a: &str, b: &str) -> bool {
     let last = a.chars().last();
     let first = b.chars().next();
-    matches!((last, first), (Some(x), Some(y)) if x.is_ascii_alphanumeric() && y.is_ascii_alphanumeric())
+    // 英文字接英文字，或英文句讀（. , ! ? ; :）後面接英文字（"Thanks." + "I am…"）
+    matches!((last, first), (Some(x), Some(y))
+        if (x.is_ascii_alphanumeric() || matches!(x, '.' | ',' | '!' | '?' | ';' | ':')) && y.is_ascii_alphanumeric())
 }
 
 #[cfg(test)]
@@ -491,5 +493,19 @@ mod tests {
         assert_eq!(p.segments.len(), 1);
         assert_eq!(p.segments[0].text, "hello world");
         assert_eq!(p.segments[0].end, 4.0);
+    }
+
+    #[test]
+    fn english_sentences_joined_with_space() {
+        // 匯出時同一人連續發言併段：英文句號後面接英文要空一格
+        assert!(needs_space("Thanks.", "I am Linda"));
+        assert!(needs_space("Really?", "Yes"));
+        assert!(needs_space("one,", "two"));
+        assert!(needs_space("hello", "world"));
+        // 中文、標點開頭、空白結尾都不加
+        assert!(!needs_space("大家好。", "今天"));
+        assert!(!needs_space("Thanks.", "大家好"));
+        assert!(!needs_space("Hello", ","));
+        assert!(!needs_space("end. ", "Next"));
     }
 }

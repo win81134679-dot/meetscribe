@@ -1,4 +1,4 @@
-# MeetScribe（會議逐字稿＋摘要，Rust）
+# MeetScribe（會議逐字稿＋摘要，Rust 桌面＋ Android）
 
 使用者看的說明在 `README.md`，設計決定與里程碑在 `PLAN.md`。這份只記改程式時查不到、會踩的事。
 
@@ -6,13 +6,18 @@
 
 私有 repo `win81134679-dot/meetscribe`（2026-10-30 建，分支 `main`）。這個資料夾是**獨立的 repo**，不是上層「一堆專案」repo 的一部分。
 本 repo 的提交身分設在 local config：`win81134679-dot` ＋ GitHub noreply 信箱（全域沒設 user.email）。
-`.gitattributes` 固定 LF，只有 `.cmd`、`.url` 是 CRLF；`target/` 不進版控。推之前掃一次祕密（`sk-or-`、`AIza`、`gh?_`）。
+`.gitattributes` 固定 LF，只有 `.cmd`、`.bat`（`android/gradlew.bat`）、`.url` 是 CRLF；`target/`、`dist/` 與 `android/` 的建置產物、簽章檔不進版控（`android/.gitignore`）。推之前掃一次祕密（`sk-or-`、`AIza`、`gh?_`）。
 
 ## 地圖
 
 - `crates/meetscribe-core`：全部邏輯。`pipeline.rs` 串起五個階段（前處理→轉錄→說話者分配→整合→摘要），每階段完成就存檔、可續跑。
 - `crates/meetscribe-app`：egui 桌面程式。`worker.rs` 自帶 tokio runtime，UI 只透過 `Cmd`／`Msg` 跟它講話；`views/` 每個畫面一檔，畫面上的動作先收成 `Action` 畫完再套用（避免同時借用 `MeetApp` 多個欄位）。
 - `crates/meetscribe-cli`：同一個 core 的命令列入口。
+- `crates/meetscribe-android`：Android 的 JNI 橋（`libmeetscribe_android.so`）。`bridge.rs` 平台無關、桌面可測；`lib.rs` 只做 JNI 轉接。
+- `android/`：Kotlin＋Compose 的 App 外殼，所有邏輯都經 `core/Repo.kt` 呼叫 Rust。見下方〈Android〉。
+
+音訊經 `audio::AudioTool`：桌面是 ffmpeg，Android 是 `audio_native`（`native-audio` feature：symphonia 解碼、自寫重取樣與靜音偵測、LAME 編 MP3）。
+改 ffmpeg 那條路的行為（切段、正規化格式）時，兩個後端要一起改，`pipeline_e2e` 的兩個完整流程測試各驗一條。
 
 外觀（2026-10-30 使用者：「UI 好醜，參考 Filee」）：`theme.rs` 照抄 Filee 上游 `Styles/Soft.axaml`／`SoftPalette.cs` 的 Soft 主題色票與尺寸
 （暖灰頁 `#F6F5F1`、白卡片 16px 圓角、主色 `#7F77DD`、深色 `#1B1B19`），跟隨 Windows 深淺色。顏色一律從 `theme::pal(ui)` 取，
@@ -61,18 +66,41 @@
 - reqwest 0.13 用 `native-tls`（`rustls` 預設走 aws-lc-rs 要 cmake）；`.query()` 要 `query` feature。
 - 含反斜線或 `"#` 的補丁：用 Python 腳本檔（scratchpad），別用 Bash heredoc；Rust 原始字串內含 `"#` 時用 `r##"…"##`。
 
+## Android
+
+2026-10-31 使用者：「我要製作成 android APP」「幫我完整建置 Android APP 輸出成 APK」。發佈檔 `dist\MeetScribe-Android-v<版本>.apk`，版本號 Gradle 直接讀根 `Cargo.toml`。
+
+- **建置一律走 `android\build-apk.ps1`**（正式版）或加 `-Debug -Abis arm64-v8a,x86_64`（模擬器用）。它用 `subst` 把專案掛成英數磁碟代號再建：
+  AGP 拒絕中文路徑；NDK 的 `*-clang.cmd` 與 clang 交給 ld.lld 的回應檔都用 cp950 轉碼，中文路徑會變亂碼。`build-rust.ps1`（Gradle preBuild 會叫）同理，並直接叫 `clang.exe --target=…`。
+- Rust 交叉編譯明確用 rustup 的 stable 工具鏈（`RUSTC` 指過去）：PATH 上先找到的是 MSI 版 rustc，沒有 Android 標準庫。
+- `third_party/mp3lame-sys` 是改過 build.rs 的上游副本（根 `Cargo.toml` 的 `[patch.crates-io]`）：上游依「目標」挑 build-dependency，從 Windows 交叉編譯到 Android 拿不到 `cc`。
+- `compileSdk = 37` 是 Compose BOM 2026.09 的要求；`targetSdk` 維持 36。Gradle 一律 `--no-daemon`（記憶體吃緊，daemon 也會佔住呼叫端的輸出管線）。
+- 簽章：`android\keystore\meetscribe-release.jks`＋`android\keystore.properties`，不進版控、靠每週完整備份。遺失就不能再發佈同一個 App 的更新，不要重新產生。
+- Kotlin ⇄ Rust 的契約：`bridge.rs` 的 op 名稱、`summary_view`／`full_view` 與事件 JSON 欄位，對應 `core/Models.kt`、`core/Repo.kt`；改一邊要改另一邊。
+  JNI 函式名綁 `io.github.win81134679.meetscribe.core.Native`（`proguard-rules.pro` 保留它）。
+- UI 慣例同桌面：顏色從 `Pal`／MaterialTheme 取（`ui/Theme.kt` 是桌面 `theme.rs` 的色票）；金鑰框只有 `ui/Components.kt` 的 `KeyBox` 一份；圖示是 `ui/Icons.kt` 的 Material 路徑（不引入 material-icons）。
+- 手機沒有 Claude Code CLI，設定頁只給 Google／OpenRouter；匯出預設資料夾是 App 的 `exports`（`Bridge::new` 會補上），分享經 FileProvider。
+- 匯入檔放 `files/data/imports/<uuid>/<原檔名>`；完成或刪除專案時刪掉，App 啟動時清掉沒有專案在用的。
+
+閉環測試（模擬器）：AVD `meetscribe_test`（API 36 x86_64）。主機跑 `python -I android/test/mock_api.py <資料夾> [延遲秒]`，用法在檔頭；
+`android/test/ui.ps1` 用 uiautomator 依文字點擊、截圖。真的金鑰由使用者自己在 App 裡貼，測試流程不從認證管理員取出金鑰。
+`adb push`／`/sdcard` 路徑用 PowerShell 跑（Git Bash 會把 `/sdcard` 改寫成 Windows 路徑）。
+
 ## 架構圖
 
 `docs/架構圖/HTML/{執行架構圖,處理流程圖}.html`（diagram-design，eight-hue 配色；橘色只給「唯一付費」的 Nemotron）。
 A2 橫式滿版：body 2245×1587、SVG viewBox 1280×904。改了 HTML 就重產：
 `node 工具/render_diagram_a2.mjs docs/架構圖/HTML/<名稱>.html` → `PNG/`（7016×4959、pHYs 300 DPI）與 `PDF/`（向量單頁）。
-需要本機 Chrome；渲染器、`cdp.mjs`、`set_png_dpi.py` 是從 Filee 專案複製來的。改了費用分工或流程階段，兩張圖要跟著改。
+需要本機 Chrome；渲染器、`cdp.mjs`、`set_png_dpi.py` 是從 Filee 專案複製來的。改了費用分工、流程階段或平台分工（電腦／Android 各用什麼），兩張圖要跟著改。
+2026-10-31 起兩張圖都含 Android：App 節點是「電腦＋手機」同一個核心，音訊節點是「ffmpeg／內建音訊」，Claude Code 標「僅電腦版」。
 
 ## 驗證
 
 ```powershell
 cargo clippy --workspace --all-targets      # 要 0 警告
 cargo test --workspace                       # 單元＋端對端（真 ffmpeg＋wiremock 模擬 OpenRouter／Gemini）＋離屏 UI
+cargo test -p meetscribe-core -p meetscribe-android --features meetscribe-core/native-audio   # Android 音訊後端＋JNI 橋
+cargo clippy --workspace --all-targets --features meetscribe-core/native-audio                 # 也要 0 警告
 ```
 
 - UI 看圖：`cargo test -p meetscribe-app` 會把 7 個畫面渲染到 `target/ui-shots/*.png`（egui_kittest，不開視窗）。它同時檢查缺字型與可及性標籤：新表單欄位要 `.labelled_by(label.id)` 或帶 `.text()`，新符號要在 Segoe UI Symbol 裡（表情符號會失敗）。

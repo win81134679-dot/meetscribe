@@ -27,7 +27,7 @@
 <div class="diagram-container">
 <svg viewBox="0 0 1280 904" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="ms-flow-title ms-flow-desc">
 <title id="ms-flow-title">MeetScribe 處理流程圖</title>
-<desc id="ms-flow-desc">一場會議依序經過前處理、轉錄、說話者分配、摘要、匯出五個階段：前處理用本機 ffmpeg，轉錄用付費的 Nemotron 3.5 Transcribe，說話者與摘要用 Gemini 免費額度，摘要也可手動改用 Claude Code CLI，每一步完成都存檔、可從斷點續跑。</desc>
+<desc id="ms-flow-desc">一場會議依序經過前處理、轉錄、說話者分配、摘要、匯出五個階段：前處理在本機轉檔切段（電腦用 ffmpeg，Android 用內建解碼與 MP3 編碼），轉錄用付費的 Nemotron 3.5 Transcribe，說話者與摘要用 Gemini 免費額度，摘要在電腦版也可手動改用 Claude Code CLI，每一步完成都存檔、可從斷點續跑。</desc>
 <defs>
 <marker id="ms-flow-arr-proc" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#3949ab"/></marker>
 <marker id="ms-flow-arr-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#e27e00"/></marker>
@@ -35,13 +35,13 @@
 
 <!-- 背景與標題 -->
 <rect width="100%" height="100%" fill="#f4f7fb"/>
-<text x="40" y="56" class="t-eyebrow" fill="#44506b">流程圖 · 一場會議從錄音到摘要</text>
+<text x="40" y="56" class="t-eyebrow" fill="#44506b">流程圖 · 一場會議從錄音到摘要（電腦版與 Android 版相同）</text>
 <text x="40" y="112" class="t-title" fill="#14213d">五個階段，只有轉錄要付費，每一步都存檔可續跑</text>
 
 <!-- 區塊：存檔續跑（最先畫） -->
 <rect x="40" y="168" width="1200" height="536" rx="8" fill="#00897b" fill-opacity="0.03" stroke="#00897b" stroke-opacity="0.35" stroke-width="0.8" stroke-dasharray="5,4"/>
 <text x="56" y="192" class="t-zone" fill="#007e71">每一步完成就存進 project.json · 中斷、關程式、額度用完都從斷點續跑，不重複付費</text>
-<text x="1224" y="192" class="t-mono" fill="#56627c" text-anchor="end">%APPDATA%\MeetScribe\projects\&lt;id&gt;</text>
+<text x="1224" y="192" class="t-mono" fill="#56627c" text-anchor="end">電腦 %APPDATA%\MeetScribe · 手機 App 私有空間</text>
 <line x1="56" y1="404" x2="1224" y2="404" stroke="#14213d" stroke-opacity="0.10" stroke-width="0.8"/>
 <text x="56" y="428" class="t-zone" fill="#56627c">各階段用什麼</text>
 
@@ -119,9 +119,9 @@
 <rect x="64" y="448" width="192" height="104" rx="6" fill="#d6dee4" stroke="#78909c" stroke-width="1.2"/>
 <rect x="72" y="454" width="24" height="12" rx="2" fill="none" stroke="#78909c" stroke-opacity="0.6" stroke-width="0.8"/>
 <text x="84" y="463" class="t-tag" fill="#4f5f67" text-anchor="middle">EXT</text>
-<text x="160" y="490" class="t-name" fill="#14213d" text-anchor="middle">ffmpeg</text>
+<text x="160" y="490" class="t-name" fill="#14213d" text-anchor="middle">ffmpeg ／ 內建</text>
 <text x="160" y="512" class="t-mono" fill="#44506b" text-anchor="middle">silencedetect</text>
-<text x="160" y="532" class="t-sub" fill="#44506b" text-anchor="middle">本機・免費</text>
+<text x="160" y="532" class="t-sub" fill="#44506b" text-anchor="middle">本機・免費・手機內建</text>
 
 <!-- 模型：Nemotron（焦點，橘） -->
 <rect x="304" y="448" width="192" height="104" rx="6" fill="#f4f7fb"/>
@@ -148,7 +148,7 @@
 <text x="1046" y="463" class="t-tag" fill="#836417" text-anchor="middle">OPT</text>
 <text x="1120" y="490" class="t-name" fill="#14213d" text-anchor="middle">Claude Code CLI</text>
 <text x="1120" y="512" class="t-mono" fill="#44506b" text-anchor="middle">claude -p</text>
-<text x="1120" y="532" class="t-sub" fill="#44506b" text-anchor="middle">用你的 Claude 訂閱</text>
+<text x="1120" y="532" class="t-sub" fill="#44506b" text-anchor="middle">Claude 訂閱・僅電腦版</text>
 
 <!-- 說明 -->
 <text x="64" y="608" class="t-callout" fill="#44506b">逐字稿文字永遠來自 Nemotron；Gemini 不重寫內容，只回答「第幾句是誰說的」，所以不會漏字。</text>

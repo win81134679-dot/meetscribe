@@ -1,0 +1,576 @@
+package io.github.win81134679.meetscribe.ui
+
+import android.media.MediaPlayer
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Checkbox
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.PrimaryTabRow
+import androidx.compose.material3.Slider
+import androidx.compose.material3.Tab
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.material3.TopAppBar
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.dp
+import io.github.win81134679.meetscribe.core.ProjectDetail
+import io.github.win81134679.meetscribe.core.Repo
+import io.github.win81134679.meetscribe.core.Segment
+import io.github.win81134679.meetscribe.core.formatClock
+import io.github.win81134679.meetscribe.core.strings
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import org.json.JSONArray
+import org.json.JSONObject
+import java.io.File
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun ProjectScreen(id: String, onBack: () -> Unit) {
+    val scope = rememberCoroutineScope()
+    var p by remember(id) { mutableStateOf<ProjectDetail?>(null) }
+    val busySet by Repo.busy.collectAsState()
+    val busy = id in busySet
+    var tab by rememberSaveable(id) { mutableIntStateOf(0) }
+    var menu by remember { mutableStateOf(false) }
+    var renaming by remember { mutableStateOf(false) }
+    var confirmDelete by remember { mutableStateOf(false) }
+
+    LaunchedEffect(id) {
+        p = Repo.loadProject(id)
+        Repo.projectUpdates.collect { if (it.id == id) p = it }
+    }
+
+    val player = rememberPlayer(p?.audioPath)
+
+    Column(Modifier.fillMaxSize()) {
+        TopAppBar(
+            title = {
+                Text(
+                    p?.summary?.title ?: "", maxLines = 1, overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.clickable(enabled = p != null && !busy) { renaming = true },
+                )
+            },
+            navigationIcon = { IconButton(onClick = onBack) { Icon(Ic.Back, contentDescription = "返回") } },
+            // 外層 Scaffold 已經留了狀態列的空間，這裡不要再加一次
+            windowInsets = WindowInsets(0),
+            actions = {
+                Box {
+                    TextButton(onClick = { menu = true }) { Text("更多") }
+                    DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+                        DropdownMenuItem(text = { Text("重新命名") }, enabled = !busy, onClick = { menu = false; renaming = true })
+                        DropdownMenuItem(
+                            text = { Text("重新辨識說話者") },
+                            enabled = !busy && (p?.chunksTotal ?: 0) > 0,
+                            onClick = { menu = false; scope.launch { Repo.tryCall("reidentify", "id" to id) } },
+                        )
+                        DropdownMenuItem(
+                            text = { Text("刪除這場會議", color = Pal.current.danger) },
+                            enabled = !busy,
+                            onClick = { menu = false; confirmDelete = true },
+                        )
+                    }
+                }
+            },
+        )
+        val proj = p
+        if (proj == null) {
+            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { Busy("載入中…") }
+            return@Column
+        }
+        StatusPanel(proj, busy)
+        PrimaryTabRow(selectedTabIndex = tab) {
+            listOf("逐字稿", "摘要", "說話者", "匯出").forEachIndexed { i, t ->
+                Tab(selected = tab == i, onClick = { tab = i }, text = { Text(t) })
+            }
+        }
+        Box(Modifier.weight(1f)) {
+            when (tab) {
+                0 -> TranscriptTab(proj, busy, player)
+                1 -> SummaryTab(proj, busy)
+                2 -> SpeakersTab(proj, busy)
+                else -> ExportTab(proj)
+            }
+        }
+    }
+
+    if (renaming && p != null) {
+        TextInputDialog("重新命名", p!!.summary.title, onDismiss = { renaming = false }) { t ->
+            renaming = false
+            scope.launch { Repo.edit("rename_project", "id" to id, "title" to t) }
+        }
+    }
+    if (confirmDelete) {
+        AlertDialog(
+            onDismissRequest = { confirmDelete = false },
+            title = { Text("刪除這場會議？") },
+            text = { Text("逐字稿、摘要、轉好的音檔都會刪除，無法復原。已匯出的檔案不受影響。") },
+            confirmButton = {
+                TextButton(onClick = {
+                    confirmDelete = false
+                    scope.launch {
+                        // 成功的回傳值就是 JSON null，所以不能用 tryCall（它失敗也回 null）來判斷成敗
+                        val ok = runCatching { Repo.call("delete_project", "id" to id) }
+                            .onFailure { Repo.toasts.emit(true to (it.message ?: "刪除失敗")) }
+                            .isSuccess
+                        if (ok) {
+                            Repo.refreshProjects()
+                            onBack()
+                        }
+                    }
+                }) { Text("刪除", color = Pal.current.danger) }
+            },
+            dismissButton = { TextButton(onClick = { confirmDelete = false }) { Text("取消") } },
+        )
+    }
+}
+
+@Composable
+private fun StatusPanel(p: ProjectDetail, busy: Boolean) {
+    val scope = rememberCoroutineScope()
+    val progress by Repo.progress.collectAsState()
+    val logs by Repo.logs.collectAsState()
+    val pal = Pal.current
+    val s = p.summary
+    if (!busy && s.status == "done") return
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 8.dp)
+            .clip(RoundedCornerShape(12.dp))
+            .background(pal.surface)
+            .padding(12.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        if (busy) {
+            val pr = progress[p.id]
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(pr?.stageLabel ?: "排隊中", fontWeight = FontWeight.Medium, modifier = Modifier.weight(1f))
+                TextButton(onClick = { scope.launch { Repo.tryCall("cancel", "id" to p.id) } }) { Text("取消") }
+            }
+            if (pr != null) LinearProgressIndicator(progress = { pr.fraction }, modifier = Modifier.fillMaxWidth())
+            else LinearProgressIndicator(Modifier.fillMaxWidth())
+            if (pr != null) Text(pr.message, color = pal.textMuted, style = MaterialTheme.typography.bodySmall)
+            if (p.chunksTotal > 1) {
+                Text("已轉錄 ${p.chunksDone}／${p.chunksTotal} 段", color = pal.textMuted, style = MaterialTheme.typography.bodySmall)
+            }
+            Text("可以切到別的 App 或關螢幕，處理會在背景繼續。", color = pal.textMuted, style = MaterialTheme.typography.bodySmall)
+        } else {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Chip(s.statusLabel, statusColor(s.status))
+                Spacer(Modifier.width(8.dp))
+                Text(s.stageLabel, color = pal.textMuted, modifier = Modifier.weight(1f))
+                if (s.resumable || s.status == "queued") {
+                    TextButton(onClick = { scope.launch { Repo.tryCall("run", "id" to p.id) } }) { Text("從中斷處續跑") }
+                }
+            }
+            s.error?.let { Text(it, color = pal.danger, style = MaterialTheme.typography.bodySmall) }
+        }
+        val lines = logs[p.id].orEmpty().takeLast(3)
+        for (l in lines) {
+            Text(
+                l.message, style = MaterialTheme.typography.bodySmall, maxLines = 2, overflow = TextOverflow.Ellipsis,
+                color = when (l.level) {
+                    "error" -> pal.danger
+                    "warn" -> pal.warning
+                    else -> pal.textMuted
+                },
+            )
+        }
+    }
+}
+
+// ---------- 逐字稿 ----------
+
+private class Player(val mp: MediaPlayer?) {
+    var playing by mutableStateOf(false)
+    var position by mutableFloatStateOf(0f)
+    val duration: Float get() = (mp?.duration ?: 0) / 1000f
+
+    fun playFrom(secs: Double) {
+        val m = mp ?: return
+        m.seekTo((secs * 1000).toInt())
+        m.start()
+        playing = true
+    }
+
+    fun toggle() {
+        val m = mp ?: return
+        if (m.isPlaying) m.pause() else m.start()
+        playing = m.isPlaying
+    }
+}
+
+@Composable
+private fun rememberPlayer(path: String?): Player {
+    val player = remember(path) {
+        Player(path?.takeIf { File(it).isFile }?.let { runCatching { MediaPlayer().apply { setDataSource(it); prepare() } }.getOrNull() })
+    }
+    DisposableEffect(player) {
+        player.mp?.setOnCompletionListener { player.playing = false }
+        onDispose { player.mp?.release() }
+    }
+    LaunchedEffect(player) {
+        while (true) {
+            player.mp?.let { if (player.playing) player.position = it.currentPosition / 1000f }
+            delay(250)
+        }
+    }
+    return player
+}
+
+@Composable
+private fun TranscriptTab(p: ProjectDetail, busy: Boolean, player: Player) {
+    val pal = Pal.current
+    var editing by remember { mutableStateOf<Segment?>(null) }
+    val colors = p.speakers.associate { it.id to speakerColor(it.color) }
+    Column(Modifier.fillMaxSize()) {
+        if (player.mp != null) {
+            Row(
+                Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                IconButton(onClick = { player.toggle() }) {
+                    Icon(if (player.playing) Ic.Pause else Ic.Play, contentDescription = if (player.playing) "暫停" else "播放")
+                }
+                Slider(
+                    value = player.position.coerceIn(0f, player.duration.coerceAtLeast(1f)),
+                    onValueChange = { player.position = it; player.mp.seekTo((it * 1000).toInt()) },
+                    valueRange = 0f..player.duration.coerceAtLeast(1f),
+                    modifier = Modifier.weight(1f),
+                )
+                Text(formatClock(player.position.toDouble()), style = MaterialTheme.typography.bodySmall, color = pal.textMuted)
+            }
+        }
+        if (p.segments.isEmpty()) {
+            Box(Modifier.fillMaxSize().padding(24.dp), contentAlignment = Alignment.Center) {
+                Text(if (busy) "逐字稿處理中，完成一段就會出現在這裡。" else "沒有逐字稿。", color = pal.textMuted)
+            }
+            return@Column
+        }
+        val currentId = if (player.playing) {
+            p.segments.lastOrNull { it.start <= player.position + 0.05 }?.id
+        } else null
+        LazyColumn(contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            items(p.segments, key = { it.id }) { seg ->
+                val c = seg.speaker?.let { colors[it] } ?: pal.textMuted
+                Column(
+                    Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(if (seg.id == currentId) pal.accentFaint else pal.page)
+                        .clickable(enabled = !busy) { editing = seg }
+                        .padding(8.dp),
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Dot(c, 8)
+                        Spacer(Modifier.width(6.dp))
+                        Text(seg.speakerName, color = c, fontWeight = FontWeight.SemiBold, style = MaterialTheme.typography.labelLarge)
+                        Spacer(Modifier.width(8.dp))
+                        Text(
+                            (if (seg.estimated) "≈" else "") + formatClock(seg.start),
+                            color = pal.accentStrong, style = MaterialTheme.typography.labelMedium, fontFamily = FontFamily.Monospace,
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(6.dp))
+                                .clickable(enabled = player.mp != null, role = Role.Button) { player.playFrom(seg.start) }
+                                .padding(horizontal = 4.dp, vertical = 2.dp),
+                        )
+                        if (seg.edited) Text("（已修改）", color = pal.textMuted, style = MaterialTheme.typography.labelSmall)
+                    }
+                    Text(seg.text, style = MaterialTheme.typography.bodyLarge)
+                }
+            }
+        }
+    }
+    editing?.let { seg -> SegmentDialog(p, seg) { editing = null } }
+}
+
+@Composable
+private fun SegmentDialog(p: ProjectDetail, seg: Segment, onDismiss: () -> Unit) {
+    val scope = rememberCoroutineScope()
+    var text by remember { mutableStateOf(seg.text) }
+    var speaker by remember { mutableStateOf(seg.speaker) }
+    var pick by remember { mutableStateOf(false) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("修改這一段　${formatClock(seg.start)}") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                if (p.speakers.isNotEmpty()) {
+                    val name = p.speakers.firstOrNull { it.id == speaker }?.name ?: "（未指定）"
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("說話者：", color = Pal.current.textMuted)
+                        TextButton(onClick = { pick = true }) { Text(name) }
+                    }
+                }
+                OutlinedTextField(text, { text = it }, minLines = 3, modifier = Modifier.fillMaxWidth())
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = {
+                onDismiss()
+                scope.launch {
+                    if (text.trim() != seg.text) Repo.edit("edit_segment", "id" to p.id, "segment" to seg.id, "text" to text)
+                    if (speaker != null && speaker != seg.speaker) {
+                        Repo.edit("set_segment_speaker", "id" to p.id, "segment" to seg.id, "speaker" to speaker)
+                    }
+                }
+            }) { Text("儲存") }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
+    )
+    if (pick) {
+        ChoiceDialog("說話者", p.speakers.map { it.id to it.name }, speaker, onDismiss = { pick = false }) {
+            speaker = it
+            pick = false
+        }
+    }
+}
+
+// ---------- 摘要 ----------
+
+@Composable
+private fun SummaryTab(p: ProjectDetail, busy: Boolean) {
+    val ctx = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var regen by remember { mutableStateOf(false) }
+    var working by remember(p.summaryDoc?.createdAt) { mutableStateOf(false) }
+    LaunchedEffect(Unit) {
+        Repo.toasts.collect { (err, _) -> if (err) working = false }
+    }
+    Column(
+        Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        val s = p.summaryDoc
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            if (s != null) IconLabelButton(Ic.Share, "分享文字") { Files.shareText(ctx, s.markdown) }
+            IconLabelButton(Ic.Refresh, if (s == null) "產生摘要" else "重新產生", enabled = !busy && !working && p.segments.isNotEmpty()) {
+                regen = true
+            }
+        }
+        when {
+            working -> Busy("產生摘要中…")
+            s == null -> Text(if (busy) "處理完成後會自動產生摘要。" else "還沒有摘要。", color = Pal.current.textMuted)
+            else -> {
+                Text("${s.model}　${s.createdAt}", color = Pal.current.textMuted, style = MaterialTheme.typography.bodySmall)
+                MarkdownText(s.markdown)
+            }
+        }
+    }
+    if (regen) {
+        TextInputDialog(
+            "重新產生摘要", p.summaryDoc?.instructions ?: p.options.optString("summary_instructions"),
+            label = "額外指示（選填）", allowEmpty = true, onDismiss = { regen = false },
+        ) { instr ->
+            regen = false
+            working = true
+            scope.launch { if (Repo.tryCall("regenerate_summary", "id" to p.id, "instructions" to instr) == null) working = false }
+        }
+    }
+}
+
+// ---------- 說話者 ----------
+
+@Composable
+private fun SpeakersTab(p: ProjectDetail, busy: Boolean) {
+    val scope = rememberCoroutineScope()
+    var renaming by remember { mutableStateOf<String?>(null) }
+    var merging by remember { mutableStateOf<String?>(null) }
+    val pal = Pal.current
+    LazyColumn(contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        if (p.speakers.isEmpty()) {
+            item { Text(if (busy) "辨識完成後會列出說話者。" else "沒有說話者資料。", color = pal.textMuted) }
+        }
+        items(p.speakers, key = { it.id }) { sp ->
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(pal.surface)
+                    .padding(12.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Dot(speakerColor(sp.color), 14)
+                Spacer(Modifier.width(10.dp))
+                Column(Modifier.weight(1f)) {
+                    Text(sp.name, fontWeight = FontWeight.Medium)
+                    Text("${sp.segments} 段發言", color = pal.textMuted, style = MaterialTheme.typography.bodySmall)
+                }
+                IconButton(onClick = { renaming = sp.id }, enabled = !busy) { Icon(Ic.Edit, contentDescription = "改名") }
+                if (p.speakers.size > 1) {
+                    TextButton(onClick = { merging = sp.id }, enabled = !busy) { Text("合併到…") }
+                }
+            }
+        }
+        item {
+            Text(
+                "名字認錯了就改名；同一個人被分成兩位就用「合併到…」。整個重新辨識在右上「更多」。",
+                color = pal.textMuted, style = MaterialTheme.typography.bodySmall,
+            )
+        }
+    }
+    renaming?.let { sid ->
+        TextInputDialog("說話者名稱", p.speakers.first { it.id == sid }.name, onDismiss = { renaming = null }) { name ->
+            renaming = null
+            scope.launch { Repo.edit("rename_speaker", "id" to p.id, "speaker" to sid, "name" to name) }
+        }
+    }
+    merging?.let { from ->
+        ChoiceDialog(
+            "把「${p.speakers.first { it.id == from }.name}」的發言併到", p.speakers.filter { it.id != from }.map { it.id to it.name },
+            null, onDismiss = { merging = null },
+        ) { into ->
+            merging = null
+            scope.launch { Repo.edit("merge_speakers", "id" to p.id, "from" to from, "into" to into) }
+        }
+    }
+}
+
+// ---------- 匯出 ----------
+
+@Composable
+private fun ExportTab(p: ProjectDetail) {
+    val ctx = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val settings by Repo.settings.collectAsState()
+    // 這場會議建立時複製的輸出選項；舊專案沒有就用目前設定
+    var opts by remember(p.id) {
+        mutableStateOf(JSONObject((p.options.optJSONObject("export") ?: settings.optJSONObject("export") ?: JSONObject()).toString()))
+    }
+    var files by remember(p.id) { mutableStateOf(p.exported.map(::File).filter { it.isFile }) }
+    var working by remember { mutableStateOf(false) }
+    val formats = opts.optJSONArray("formats").strings().toSet()
+
+    fun update(f: JSONObject.() -> Unit) {
+        opts = JSONObject(opts.toString()).apply(f)
+    }
+
+    Column(
+        Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        SectionCard("格式") {
+            for (e in Repo.exporters) {
+                Row(
+                    Modifier.fillMaxWidth().clickable(role = Role.Checkbox) {
+                        update { put("formats", JSONArray(if (e.id in formats) formats - e.id else formats + e.id)) }
+                    },
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Checkbox(checked = e.id in formats, onCheckedChange = null)
+                    Spacer(Modifier.width(8.dp))
+                    Text("${e.label}（.${e.extension}）")
+                }
+            }
+            SelectRow("內容", Repo.contents.map { it.id to it.label }, opts.optString("content", "Both")) { update { put("content", it) } }
+            SwitchRow("時間戳記", opts.optBoolean("timestamps", true)) { v -> update { put("timestamps", v) } }
+            SwitchRow("標出說話者", opts.optBoolean("speaker_names", true)) { v -> update { put("speaker_names", v) } }
+            SwitchRow("同一人連續發言併成一段", opts.optBoolean("merge_turns", true)) { v -> update { put("merge_turns", v) } }
+            SwitchRow("開頭附檔案資訊與發言統計", opts.optBoolean("header", true)) { v -> update { put("header", v) } }
+        }
+        IconLabelButton(null, if (working) "匯出中…" else "匯出", primary = true, enabled = !working && formats.isNotEmpty()) {
+            working = true
+            scope.launch {
+                val r = Repo.tryCall("export", "id" to p.id, "options" to opts) as? JSONArray
+                working = false
+                if (r != null) files = r.strings().map(::File)
+            }
+        }
+        if (files.isNotEmpty()) {
+            SectionCard("匯出的檔案", "存在 App 的匯出資料夾；用「分享」存到雲端硬碟、傳 LINE 或寄信。") {
+                IconLabelButton(Ic.Share, "全部分享") { Files.share(ctx, files) }
+                for (f in files) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(f.name, Modifier.weight(1f), maxLines = 2, overflow = TextOverflow.Ellipsis)
+                        IconButton(onClick = {
+                            if (!Files.open(ctx, f)) scope.launch { Repo.toasts.emit(true to "手機上沒有能開 .${f.extension} 的 App") }
+                        }) { Icon(Ic.OpenIn, contentDescription = "開啟", Modifier.size(20.dp)) }
+                        IconButton(onClick = { Files.share(ctx, listOf(f)) }) { Icon(Ic.Share, contentDescription = "分享", Modifier.size(20.dp)) }
+                    }
+                }
+            }
+        }
+        if (p.sttUsd + p.llmUsd > 0 || p.modelStt.isNotEmpty()) {
+            SectionCard("這場會議") {
+                val pal = Pal.current
+                Text("轉錄 US$%.3f　其他 US$%.3f".format(p.sttUsd, p.llmUsd), color = pal.textMuted, style = MaterialTheme.typography.bodySmall)
+                if (p.modelStt.isNotEmpty()) {
+                    Text(
+                        "模型：${p.modelStt}／${p.modelAttribution}／${p.modelSummary}",
+                        color = pal.textMuted, style = MaterialTheme.typography.bodySmall,
+                    )
+                }
+                for (w in p.warnings) Text(w, color = pal.warning, style = MaterialTheme.typography.bodySmall)
+            }
+        }
+    }
+}
+
+@Composable
+fun TextInputDialog(
+    title: String,
+    initial: String,
+    label: String? = null,
+    allowEmpty: Boolean = false,
+    onDismiss: () -> Unit,
+    onConfirm: (String) -> Unit,
+) {
+    var text by remember { mutableStateOf(initial) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(title) },
+        text = {
+            OutlinedTextField(text, { text = it }, label = label?.let { { Text(it) } }, modifier = Modifier.fillMaxWidth())
+        },
+        confirmButton = {
+            TextButton(onClick = { onConfirm(text.trim()) }, enabled = allowEmpty || text.isNotBlank()) { Text("確定") }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
+    )
+}

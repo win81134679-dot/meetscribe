@@ -10,6 +10,76 @@ use tokio_util::sync::CancellationToken;
 /// 正規化後的格式。16 kHz mono 是 Nemotron 的原生取樣率；32 kbps MP3 一小時約 14 MB。
 pub const NORMALIZED_EXT: &str = "mp3";
 pub const NORMALIZED_FORMAT: &str = "mp3";
+/// 正規化後的取樣率。
+pub const TARGET_RATE: u32 = 16_000;
+
+/// 處理流程用的音訊工具：桌面叫 ffmpeg；Android 沒有 ffmpeg，用內建的解碼與編碼（`native-audio` feature）。
+#[derive(Clone, Debug)]
+pub enum AudioTool {
+    Ffmpeg(Ffmpeg),
+    #[cfg(feature = "native-audio")]
+    Native(crate::audio_native::NativeAudio),
+}
+
+impl AudioTool {
+    /// Android 一律用內建後端；其他平台照 [`Ffmpeg::locate`] 找 ffmpeg。
+    pub fn locate(custom: &str) -> Result<Self> {
+        #[cfg(all(target_os = "android", feature = "native-audio"))]
+        {
+            let _ = custom;
+            Ok(Self::Native(crate::audio_native::NativeAudio))
+        }
+        #[cfg(not(all(target_os = "android", feature = "native-audio")))]
+        {
+            Ffmpeg::locate(custom).map(Self::Ffmpeg)
+        }
+    }
+
+    pub async fn probe_duration(&self, input: &Path) -> Result<f64> {
+        match self {
+            Self::Ffmpeg(f) => f.probe_duration(input).await,
+            #[cfg(feature = "native-audio")]
+            Self::Native(n) => n.probe_duration(input).await,
+        }
+    }
+
+    pub async fn normalize(
+        &self,
+        input: &Path,
+        output: &Path,
+        total_secs: f64,
+        progress: &(dyn Fn(f32) + Send + Sync),
+        cancel: &CancellationToken,
+    ) -> Result<()> {
+        match self {
+            Self::Ffmpeg(f) => f.normalize(input, output, total_secs, progress, cancel).await,
+            #[cfg(feature = "native-audio")]
+            Self::Native(n) => n.normalize(input, output, total_secs, progress, cancel).await,
+        }
+    }
+
+    pub async fn detect_silences(
+        &self,
+        input: &Path,
+        noise_db: i32,
+        min_secs: f64,
+        cancel: &CancellationToken,
+    ) -> Result<Vec<(f64, f64)>> {
+        match self {
+            Self::Ffmpeg(f) => f.detect_silences(input, noise_db, min_secs, cancel).await,
+            #[cfg(feature = "native-audio")]
+            Self::Native(n) => n.detect_silences(input, noise_db, min_secs, cancel).await,
+        }
+    }
+
+    pub async fn extract(&self, input: &Path, start: f64, end: f64, output: &Path) -> Result<()> {
+        match self {
+            Self::Ffmpeg(f) => f.extract(input, start, end, output).await,
+            #[cfg(feature = "native-audio")]
+            Self::Native(n) => n.extract(input, start, end, output).await,
+        }
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct Ffmpeg {

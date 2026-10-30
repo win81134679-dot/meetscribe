@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 對話框＋三行逐字稿；放在 108dp 畫布中央 66dp 的安全區內 -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M36,32h36a8,8 0,0 1,8 8v22a8,8 0,0 1,-8 8H52l-10,9v-9h-6a8,8 0,0 1,-8 -8V40a8,8 0,0 1,8 -8z" />
+    <path
+        android:fillColor="#7F77DD"
+        android:pathData="M38,42h32v4H38zM38,50h26v4H38zM38,58h18v4H38z" />
+</vector>

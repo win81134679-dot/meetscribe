@@ -3,7 +3,7 @@
 //! 每一步完成就存檔；中斷（失敗、取消、關程式）後再跑同一個專案，會從還沒做完的地方接著做。
 
 use crate::attribution::{self, KnownSpeaker, ROSTER_LIMIT};
-use crate::audio::{self, Ffmpeg, NORMALIZED_EXT, NORMALIZED_FORMAT};
+use crate::audio::{self, AudioTool, NORMALIZED_EXT, NORMALIZED_FORMAT};
 use crate::claude_code::ClaudeCodeCli;
 use crate::config::{AppPaths, LlmProvider, Settings};
 use crate::export;
@@ -70,7 +70,7 @@ pub struct Engine {
     pub attribution_llm: Arc<dyn LlmClient>,
     /// 說話者整合與摘要（純文字）。
     pub text_llm: Arc<dyn LlmClient>,
-    pub ffmpeg: Ffmpeg,
+    pub audio: AudioTool,
     pub store: ProjectStore,
     pub stt_caps: Option<SttCapabilities>,
     /// 建立引擎時的提醒（例如沒有 Google Key 改用 OpenRouter 免費模型），每次執行會寫進紀錄。
@@ -120,7 +120,7 @@ impl Engine {
     /// 依設定建立引擎：語音轉文字走 OpenRouter；聊天模型依角色走 Google AI Studio 或 OpenRouter。
     /// 選了 Google 卻沒有 Google Key 時，改用 OpenRouter 上的免費模型並記下提醒。
     pub async fn from_settings(paths: &AppPaths, mut settings: Settings, keys: ApiKeys) -> Result<Self> {
-        let ffmpeg = Ffmpeg::locate(&settings.ffmpeg_path)?;
+        let audio = AudioTool::locate(&settings.ffmpeg_path)?;
         let client = OpenRouter::new(&settings, keys.openrouter.clone())?;
         let caps = match client.stt_capabilities(&settings.stt_model).await {
             Ok(c) => Some(c),
@@ -197,7 +197,7 @@ impl Engine {
             transcriber: openrouter,
             attribution_llm,
             text_llm,
-            ffmpeg,
+            audio,
             store: ProjectStore::new(paths.projects_dir()),
             stt_caps: caps,
             notices,
@@ -313,7 +313,7 @@ impl Engine {
                 return Err(Error::Other(format!("找不到原始檔案：{}", p.source_file.display())));
             }
             ctx.progress(p, Stage::Prepare, 0.0, "讀取音訊資訊");
-            let src_duration = self.ffmpeg.probe_duration(&p.source_file).await?;
+            let src_duration = self.audio.probe_duration(&p.source_file).await?;
             ctx.log(p, LogLevel::Info, format!("原始音訊長度 {}", fmt_clock(src_duration)));
             let pid = p.id;
             let sink = ctx.sink.clone();
@@ -325,10 +325,10 @@ impl Engine {
                     message: "轉成 16 kHz 單聲道".into(),
                 });
             };
-            self.ffmpeg
+            self.audio
                 .normalize(&p.source_file, &audio_path, src_duration, &report, ctx.cancel)
                 .await?;
-            p.duration = self.ffmpeg.probe_duration(&audio_path).await.unwrap_or(src_duration);
+            p.duration = self.audio.probe_duration(&audio_path).await.unwrap_or(src_duration);
             p.audio_file = Some(audio_rel.clone());
             self.save(p, ctx.sink)?;
         }
@@ -339,10 +339,10 @@ impl Engine {
                 vec![(0.0, p.duration)]
             } else {
                 ctx.progress(p, Stage::Prepare, 0.85, "尋找停頓點以便分段");
-                let mut silences = self.ffmpeg.detect_silences(&audio_path, -35, 0.4, ctx.cancel).await?;
+                let mut silences = self.audio.detect_silences(&audio_path, -35, 0.4, ctx.cancel).await?;
                 if silences.len() < 3 {
                     // 背景噪音大的錄音放寬門檻
-                    silences = self.ffmpeg.detect_silences(&audio_path, -28, 0.3, ctx.cancel).await?;
+                    silences = self.audio.detect_silences(&audio_path, -28, 0.3, ctx.cancel).await?;
                 }
                 audio::plan_chunks(p.duration, &silences, target, CUT_WINDOW_SECS)
             };
@@ -352,7 +352,7 @@ impl Engine {
                     audio_rel.clone()
                 } else {
                     let rel = format!("chunks/chunk_{i:03}.{NORMALIZED_EXT}");
-                    self.ffmpeg.extract(&audio_path, start, end, &dir.join(&rel)).await?;
+                    self.audio.extract(&audio_path, start, end, &dir.join(&rel)).await?;
                     rel
                 };
                 chunks.push(ChunkRecord {
@@ -815,7 +815,7 @@ impl Engine {
             let Some((start, end)) = best else { continue };
             let rel = format!("clips/{id}.{NORMALIZED_EXT}");
             match self
-                .ffmpeg
+                .audio
                 .extract(&dir.join(&audio_rel), start, end.min(start + 12.0), &dir.join(&rel))
                 .await
             {

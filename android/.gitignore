@@ -1,0 +1,13 @@
+.gradle/
+.kotlin/
+build/
+app/build/
+local.properties
+.idea/
+*.iml
+captures/
+# Rust 交叉編譯產物（build-rust.ps1 產生）
+app/src/main/jniLibs/
+# 簽章金鑰與密碼：絕不進版控（遺失就無法再發佈同一個 App 的更新）
+keystore/
+keystore.properties

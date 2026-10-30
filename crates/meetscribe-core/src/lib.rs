@@ -4,8 +4,11 @@
 //! 擴充點：[`providers::Transcriber`]、[`providers::LlmClient`]、[`export::Exporter`]、
 //! 以及可外部覆寫的提示詞（[`prompts`]）。
 
+pub mod account;
 pub mod attribution;
 pub mod audio;
+#[cfg(feature = "native-audio")]
+pub mod audio_native;
 pub mod claude_code;
 pub mod config;
 pub mod error;

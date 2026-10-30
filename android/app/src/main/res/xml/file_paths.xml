@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 只開放匯出資料夾給「分享／開啟」用；金鑰、專案資料在內部儲存區，不經 FileProvider -->
+<paths>
+    <external-files-path name="exports" path="exports/" />
+    <files-path name="exports_internal" path="exports/" />
+</paths>

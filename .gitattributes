@@ -3,3 +3,6 @@
 *.png binary
 *.url text eol=crlf
 *.pdf binary
+*.bat text eol=crlf
+*.jar binary
+*.jks binary

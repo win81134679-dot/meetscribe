@@ -1,6 +1,6 @@
 # MeetScribe 計畫書
 
-會議錄音 → 完整逐字稿（含說話者）＋依內容決定格式的會議摘要。Rust 桌面工具。
+會議錄音 → 完整逐字稿（含說話者）＋依內容決定格式的會議摘要。Rust 桌面工具＋ Android App（共用 Rust 核心）。
 
 ## 需求與對應做法
 
@@ -59,12 +59,24 @@
 - [x] M9 輸出選項（使用者：「可以設定逐字稿的格式 Markdown docx txt…等跟可自訂輸出位置，幫我想完整」）：
   `export::ExportOptions`（格式、資料夾、子資料夾、檔名樣式、內容四選一、逐字稿樣式、同名覆蓋、自動匯出），
   設定頁／新增轉錄／匯出頁共用 `widgets::export_options`，CLI 的 `--formats`／`--out` 蓋在上面
+- [x] M10 Android App（2026-10-31，使用者：「我要製作成 android APP」「幫我完整建置 Android APP 輸出成 APK」）：
+  - 核心不分叉：`meetscribe-core` 加 `native-audio` feature（symphonia 解碼＋自寫重取樣／靜音偵測＋LAME 編 MP3，介面同 ffmpeg 的 `AudioTool`）；
+    Android 上 TLS 改 rustls＋ring＋webpki-roots，金鑰改存 App 私有檔（`secrets::use_file_store`）。
+  - `crates/meetscribe-android`：JNI 橋，`call`（同步 JSON 請求）／`poll`（事件佇列），一次跑一個專案，同桌面 worker 的分工。
+  - `android/`：Kotlin＋Jetpack Compose（新增轉錄＋三步驟設定、會議記錄、專案頁四分頁、設定），前景服務（dataSync＋通知進度），
+    接收「分享／開啟方式」的錄音，匯出檔經 FileProvider 分享。Opus／AMR 等 symphonia 不支援的格式用 MediaCodec 轉 WAV 再交給核心。
+  - 驗證：電腦上原生音訊後端跑完整兩段式流程（模擬 API）；Android 16 模擬器實機閉環：系統檔案選擇器／開啟方式匯入 m4a 與 opus、
+    手機端編出的 MP3 經 ffprobe 驗證（16 kHz mono 32 kbps，長度相符）、說話者分配、摘要、自動匯出 docx/md/srt、通知列進度、
+    取消→續跑、改說話者名、改句子、從時間點播放、刪除；手機連 openrouter.ai 的 HTTPS 實測可用。過程中修掉：英文句子併段少空格（桌面也有）、
+    匯出檔顯示 App 內部路徑、未開始的匯入檔殘留、短錄音費用顯示 US$0.00、專案頁標題列多一段狀態列空白。
 
 ## 尚未驗證（需要使用者的金鑰）
 
 - 用真的 OpenRouter Key 跑 Nemotron 轉錄（目前只對模擬伺服器測過；`verbose_json`／`keyterms` 若供應商不收，程式會自動改送精簡請求）。
 - 用真的 Google AI Studio Key 跑 Gemini 說話者分配（請求格式依官方 `generateContent` 文件，模擬伺服器測過）。
 - 實機啟動桌面程式（依防毒規則由使用者自己開）。
+- Android 版用真的金鑰跑一次（模擬器閉環用的是模擬 API；自動化測試不得從認證管理員取出金鑰）、裝到實體手機（目前只在 x86_64 模擬器上跑過，
+  實體手機用的 arm64 函式庫有編出、符號檢查過，但沒有在 ARM 裝置上執行過）。
 
 ## 不做的事
 
@@ -72,6 +84,7 @@
 
 ## 之後可以做（未排程）
 
-- 即時錄音（麥克風／系統音訊）直接進 pipeline。
+- 即時錄音（麥克風／系統音訊）直接進 pipeline；Android 版尤其適合（App 內錄音→直接轉錄）。
+- Android：電腦與手機之間同步會議資料；一次匯入多個檔；自訂提示詞。
 - 本機聲紋嵌入做跨段比對，取代聲音樣本送 LLM。
 - 安裝程式（Inno Setup）與 ffmpeg 一起打包。
