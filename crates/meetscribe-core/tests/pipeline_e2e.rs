@@ -237,9 +237,9 @@ async fn stt_requests(server: &MockServer, longer_than: usize) -> usize {
         .count()
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn gateway_timeout_splits_chunk_in_half() {
-    let Ok(ffmpeg) = Ffmpeg::locate("") else { return };
+/// 單段（300 秒、chunk_minutes 4 不切）的專案，轉錄請求先回 `timeouts` 次 524 再成功。
+async fn run_with_queue_timeouts(timeouts: Option<u64>) -> (Project, MockServer, Vec<String>) {
+    let ffmpeg = Ffmpeg::locate("").unwrap();
     let tmp = tempfile::tempdir().unwrap();
     let paths = AppPaths::at(tmp.path().join("home"));
     paths.ensure().unwrap();
@@ -247,17 +247,16 @@ async fn gateway_timeout_splits_chunk_in_half() {
     make_audio(&ffmpeg, &source).await;
 
     let server = mock_openrouter().await;
-    // 整段 300 秒（約 1.6 MB）送出去，供應商一律處理不完回 524；切半之後就正常
-    const WHOLE: usize = 1_300_000;
-    Mock::given(method("POST"))
+    let mut timeout = Mock::given(method("POST"))
         .and(path("/audio/transcriptions"))
-        .and(BodyLongerThan(WHOLE))
         .respond_with(ResponseTemplate::new(524).set_body_json(serde_json::json!({
             "error": { "code": 524, "message": "Provider returned 524" }
         })))
-        .with_priority(1)
-        .mount(&server)
-        .await;
+        .with_priority(1);
+    if let Some(n) = timeouts {
+        timeout = timeout.up_to_n_times(n);
+    }
+    timeout.mount(&server).await;
     let settings = Settings {
         api_base: server.uri(),
         google_api_base: format!("{}/gemini", server.uri()),
@@ -270,20 +269,50 @@ async fn gateway_timeout_splits_chunk_in_half() {
         openrouter: "sk-test".into(),
         google: Some("AIza-test".into()),
     };
-    let engine = Engine::from_settings(&paths, settings, keys).await.unwrap();
-    let done = engine
-        .run(Project::new(source, JobOptions::default()), Arc::new(|_| {}), CancellationToken::new())
+    let mut engine = Engine::from_settings(&paths, settings, keys).await.unwrap();
+    engine.queue_retry_wait = std::time::Duration::ZERO;
+    let logs: Arc<Mutex<Vec<String>>> = Arc::default();
+    let sink: EventSink = {
+        let logs = logs.clone();
+        Arc::new(move |e| {
+            if let Event::Log { message, .. } = e {
+                logs.lock().unwrap().push(message);
+            }
+        })
+    };
+    let p = engine
+        .run(Project::new(source, JobOptions::default()), sink, CancellationToken::new())
         .await;
+    let logs = logs.lock().unwrap().clone();
+    (p, server, logs)
+}
 
+#[tokio::test(flavor = "multi_thread")]
+async fn queue_timeout_resends_same_chunk() {
+    if Ffmpeg::locate("").is_err() {
+        return;
+    }
+    let (done, server, logs) = run_with_queue_timeouts(Some(2)).await;
     assert_eq!(done.status, ProjectStatus::Done, "warnings: {:?}", done.warnings);
-    assert_eq!(done.chunks.len(), 2, "524 的那段要切成兩段");
-    assert!((done.chunks[0].end - 116.5).abs() < 1.5, "在停頓處切：{}", done.chunks[0].end);
-    assert_eq!(done.chunks[1].start, done.chunks[0].end);
-    assert!((done.chunks[1].end - done.duration).abs() < 1e-6);
-    assert_eq!(done.chunks.iter().map(|c| c.index).collect::<Vec<_>>(), vec![0, 1]);
-    // 524 不在同樣長度上重試：整段只送過兩次（第一次 503 重試、第二次 524 就切）
-    assert_eq!(stt_requests(&server, WHOLE).await, 2);
-    assert!((done.usage.stt_usd - 0.008).abs() < 1e-9);
+    // 排隊逾時跟長度無關：不切段，同一段原樣重送
+    assert_eq!(done.chunks.len(), 1);
+    // 503（HTTP 層重試）→ 524（第 1 輪）→ 524（第 2 輪）→ 成功
+    assert_eq!(stt_requests(&server, 0).await, 4);
+    assert_eq!(logs.iter().filter(|l| l.contains("排隊逾時（不收費）")).count(), 2, "{logs:?}");
+    assert!(!logs.iter().any(|l| l.contains("太長")));
+    assert!((done.usage.stt_usd - 0.004).abs() < 1e-9);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn endless_queue_timeouts_stop_resumably() {
+    if Ffmpeg::locate("").is_err() {
+        return;
+    }
+    let (p, server, _) = run_with_queue_timeouts(None).await;
+    assert!(matches!(&p.status, ProjectStatus::Failed(m) if m.contains("排隊")), "{:?}", p.status);
+    assert!(p.status.is_resumable());
+    // 第 1 次送出＋6 輪重送（另加一次 503 的 HTTP 層重試）
+    assert_eq!(stt_requests(&server, 0).await, 8);
 }
 
 #[tokio::test(flavor = "multi_thread")]

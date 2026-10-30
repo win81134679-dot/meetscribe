@@ -28,8 +28,10 @@ use uuid::Uuid;
 const UNIT_MAX_CHARS: usize = 80;
 /// 靜音切點的搜尋範圍（秒）。
 const CUT_WINDOW_SECS: f64 = 90.0;
-/// 比這更短的段落遇到供應商逾時就不再切，直接回報錯誤。
-const MIN_SPLIT_SECS: f64 = 120.0;
+/// 轉錄服務排隊逾時時最多重送幾輪（逾時不收費）。
+const MAX_QUEUE_RETRY_ROUNDS: u32 = 6;
+/// 每輪重送前的等待（第 n 輪等 n 倍）。
+const QUEUE_RETRY_WAIT: std::time::Duration = std::time::Duration::from_secs(20);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LogLevel {
@@ -73,6 +75,8 @@ pub struct Engine {
     pub stt_caps: Option<SttCapabilities>,
     /// 建立引擎時的提醒（例如沒有 Google Key 改用 OpenRouter 免費模型），每次執行會寫進紀錄。
     pub notices: Vec<String>,
+    /// 轉錄排隊逾時後、每輪重送前的基本等待（測試設成 0）。
+    pub queue_retry_wait: std::time::Duration,
 }
 
 /// 傳進各步驟的共用參數。
@@ -197,6 +201,7 @@ impl Engine {
             store: ProjectStore::new(paths.projects_dir()),
             stt_caps: caps,
             notices,
+            queue_retry_wait: QUEUE_RETRY_WAIT,
             settings,
         })
     }
@@ -373,27 +378,49 @@ impl Engine {
 
     // ---------- 轉錄 ----------
 
-    /// 送出所有還沒轉錄的段落。供應商來不及處理（524）的段落對半切開再送一輪；
+    /// 送出所有還沒轉錄的段落，一輪一輪送到全部完成。
+    ///
+    /// 供應商排隊逾時（504／524）跟段落內容、長度無關，也不收費（2026-10-31 實測，見 CLAUDE.md），
+    /// 所以原樣重送：出現過一次就改成一次只送一段（自己的請求不互相卡位），每輪之間等久一點讓佇列消化。
     /// 其他錯誤不中斷別段，等這一輪都回來、做完的存檔之後才回報。
     async fn transcribe(&self, p: &mut Project, ctx: &Ctx<'_>) -> Result<()> {
+        let mut concurrency = self.settings.stt_concurrency.max(1);
+        let mut round = 0u32;
         loop {
-            let (too_long, failed) = self.transcribe_pending(p, ctx).await?;
-            ctx.check()?;
-            // 有別的錯誤也先把太長的切好存檔，續跑時直接送短的
-            if !too_long.is_empty() {
-                for &i in too_long.iter().rev() {
-                    self.split_chunk(p, i, ctx).await?;
-                }
-                for (k, c) in p.chunks.iter_mut().enumerate() {
-                    c.index = k;
-                }
-                self.save(p, ctx.sink)?;
-            }
+            let (timed_out, failed) = self.transcribe_pending(p, concurrency, ctx).await?;
             if let Some(e) = failed {
                 return Err(e);
             }
-            if too_long.is_empty() {
+            if timed_out.is_empty() {
                 break;
+            }
+            round += 1;
+            if round > MAX_QUEUE_RETRY_ROUNDS {
+                return Err(Error::Other(format!(
+                    "轉錄服務一直在排隊（連續 {MAX_QUEUE_RETRY_ROUNDS} 輪逾時，逾時的請求不收費）；\
+                     已完成的段落都保留了，稍後再按「從中斷處繼續」"
+                )));
+            }
+            concurrency = 1;
+            let wait = self.queue_retry_wait * round;
+            ctx.log(
+                p,
+                LogLevel::Info,
+                format!(
+                    "{} 段在轉錄服務排隊逾時（不收費），{} 秒後一段一段重送（第 {round} 輪）",
+                    timed_out.len(),
+                    wait.as_secs()
+                ),
+            );
+            ctx.progress(
+                p,
+                Stage::Transcribe,
+                p.chunks.iter().filter(|c| c.stt.is_some()).count() as f32 / p.chunks.len() as f32,
+                format!("轉錄服務忙碌，{} 秒後重送 {} 段", wait.as_secs(), timed_out.len()),
+            );
+            tokio::select! {
+                _ = ctx.cancel.cancelled() => return Err(Error::Cancelled),
+                _ = tokio::time::sleep(wait) => {}
             }
         }
         let chars: usize = p
@@ -411,11 +438,16 @@ impl Engine {
         Ok(())
     }
 
-    /// 一輪轉錄，做完的段落逐段存檔。回傳太長、要切開重送的段落（由小到大）與第一個其他錯誤。
-    async fn transcribe_pending(&self, p: &mut Project, ctx: &Ctx<'_>) -> Result<(Vec<usize>, Option<Error>)> {
+    /// 一輪轉錄，做完的段落逐段存檔。回傳排隊逾時、要重送的段落與第一個其他錯誤。
+    async fn transcribe_pending(
+        &self,
+        p: &mut Project,
+        concurrency: usize,
+        ctx: &Ctx<'_>,
+    ) -> Result<(Vec<usize>, Option<Error>)> {
         let pending: Vec<usize> = p.chunks.iter().filter(|c| c.stt.is_none()).map(|c| c.index).collect();
         let total = p.chunks.len();
-        let mut too_long = Vec::new();
+        let mut timed_out = Vec::new();
         let mut failed = None;
         if !pending.is_empty() {
             let dir = self.store.dir(p.id);
@@ -449,23 +481,13 @@ impl Engine {
                     (i, r.await)
                 }
             });
-            let mut stream = futures::stream::iter(jobs).buffer_unordered(self.settings.stt_concurrency.max(1));
+            let mut stream = futures::stream::iter(jobs).buffer_unordered(concurrency);
             let mut done = done_before;
             while let Some((i, r)) = stream.next().await {
                 let stt = match r {
                     Ok(stt) => stt,
-                    Err(e) if e.is_gateway_timeout() && p.chunks[i].duration() > MIN_SPLIT_SECS => {
-                        ctx.log(
-                            p,
-                            LogLevel::Warn,
-                            format!(
-                                "第 {}/{} 段（{}）太長，供應商來不及處理（{e}），切成兩段重送",
-                                i + 1,
-                                total,
-                                fmt_clock(p.chunks[i].duration())
-                            ),
-                        );
-                        too_long.push(i);
+                    Err(e) if e.is_gateway_timeout() => {
+                        timed_out.push(i);
                         continue;
                     }
                     Err(e) => {
@@ -498,46 +520,7 @@ impl Engine {
                 );
             }
         }
-        too_long.sort_unstable();
-        Ok((too_long, failed))
-    }
-
-    /// 把第 `i` 段在中點附近的停頓切成兩段（換成兩筆新的 [`ChunkRecord`]，序號由呼叫端重排）。
-    async fn split_chunk(&self, p: &mut Project, i: usize, ctx: &Ctx<'_>) -> Result<()> {
-        let dir = self.store.dir(p.id);
-        let old = p.chunks[i].clone();
-        let src = dir.join(&old.file);
-        let dur = old.duration();
-        let silences = self
-            .ffmpeg
-            .detect_silences(&src, -35, 0.4, ctx.cancel)
-            .await
-            .unwrap_or_default();
-        let plan = audio::plan_chunks(dur, &silences, dur / 2.0, (dur / 6.0).min(CUT_WINDOW_SECS));
-        let cut = if plan.len() >= 2 { plan[0].1 } else { dur / 2.0 };
-        let mut halves = Vec::with_capacity(2);
-        for (from, to) in [(0.0, cut), (cut, dur)] {
-            let (start, end) = (old.start + from, old.start + to);
-            let rel = format!(
-                "chunks/part_{:09}_{:09}.{NORMALIZED_EXT}",
-                (start * 1000.0).round() as u64,
-                (end * 1000.0).round() as u64
-            );
-            self.ffmpeg.extract(&src, from, to, &dir.join(&rel)).await?;
-            halves.push(ChunkRecord {
-                index: i,
-                start,
-                end,
-                file: rel,
-                stt: None,
-                attributed: false,
-            });
-        }
-        if old.file.starts_with("chunks/") {
-            let _ = std::fs::remove_file(&src);
-        }
-        p.chunks.splice(i..=i, halves);
-        Ok(())
+        Ok((timed_out, failed))
     }
 
     // ---------- 說話者分配 ----------

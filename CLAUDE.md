@@ -39,7 +39,11 @@
 
 ## 外部事實（會變，動相關程式前重查）
 
-- 20 分鐘一段常被 OpenRouter 回 524（DeepInfra 處理超過閘道等待上限，每次約 2 分鐘才回），同長度重試沒用（2026-10-31 實測 6/8 段連 5 次）。所以轉錄的 524／504／逾時不重試，由 `pipeline::split_chunk` 對半切；預設段長 10 分。
+- 轉錄的 504／524 是 DeepInfra 排隊，**不是段落太長或內容問題**（2026-10-31 實測：同一段 10 分鐘音訊 20 秒成功、128 秒成功、181 秒 504 都出現過；
+  多個請求在同一秒一起回來；OpenRouter 閘道約 180 秒切斷）。**逾時不收費**（對 `/key` 用量帳：幾十次逾時沒有計費）。
+  所以 `pipeline::transcribe` 一輪輪原樣重送：出現逾時後改成一次一段、每輪多等 20 秒，6 輪後才停（可續跑）。曾經試過「逾時就對半切」，沒用，已拿掉。
+  技術報告提到的「生成迴圈跑到 token 上限」也查過：temperature 0 下同一段時快時慢，不是主因。
+  診斷工具：`cargo run -p meetscribe-core --example stt_probe -- <段落.mp3> verbose`（直接送 OpenRouter 量時間；`usage` 查金鑰用量），金鑰從認證管理員讀、不印出。
 - OpenRouter 上 Nemotron 唯一供應商 DeepInfra：`supports_diarization: false`、不吃 prompt。所以說話者靠 Gemini 聽音訊分配；`stt_capabilities()` 查到支援時會自動改走原生 diarize。查法：`GET /api/v1/models/<id>/endpoints`。
 - Gemini 模型名稱常改版：`gemini::pick_audio_model` 在設定的名字不存在時挑最新的穩定版 Flash，別把模型名寫死在別處。
 - `claude -p`：不能用 `--bare`（只認 ANTHROPIC_API_KEY，訂閱登入會失敗）；用 `--setting-sources project`＋空工作目錄隔離使用者的 hook／plugin。`total_cost_usd` 是牌價換算，記為 0。

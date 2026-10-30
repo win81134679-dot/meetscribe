@@ -38,7 +38,7 @@ impl Error {
     }
 
     /// 供應商來不及處理完就被切斷（OpenRouter 的 524／504、本機等到逾時）。
-    /// 同樣長度重送多半還是一樣，轉錄時改成把音訊切短再送。
+    /// 轉錄時多半是供應商在排隊，不收費；由流程一輪輪重送，不在 HTTP 層原地重試（會佔著併發名額）。
     pub fn is_gateway_timeout(&self) -> bool {
         match self {
             Error::Api { status, .. } => matches!(status, 504 | 524),

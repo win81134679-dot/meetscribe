@@ -128,7 +128,7 @@ impl OpenRouter {
         .await
     }
 
-    /// 轉錄請求：供應商逾時（524）不原樣重試，交給流程把音訊切短再送。
+    /// 轉錄請求：排隊逾時（504／524）不在這裡重試，交給流程降成一次一段、等一下再整輪重送。
     async fn post_stt(&self, req: &TranscribeRequest<'_>, minimal: bool, cancel: &CancellationToken) -> Result<Value> {
         self.post_json_if("audio/transcriptions", &self.stt_body(req, minimal), cancel, |e| {
             e.is_retryable() && !e.is_gateway_timeout()

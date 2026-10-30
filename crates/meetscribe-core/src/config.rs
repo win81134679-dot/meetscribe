@@ -69,8 +69,7 @@ pub struct Settings {
     pub summary_model: String,
     /// 摘要輸出語言；`auto` 表示跟會議主要語言相同。
     pub output_language: String,
-    /// 每段音訊的目標長度（分鐘）。Nemotron 單次上限 60 分，但 20 分鐘的段落常讓供應商處理超時（524），
-    /// 所以預設 10 分；還是超時的段落轉錄時會再自動對半切。
+    /// 每段音訊的目標長度（分鐘）。Nemotron 單次上限 60 分；段落短，單次處理時間短，比較不會跟排隊時間加起來撞到閘道上限。
     pub chunk_minutes: u32,
     /// 同時送出的轉錄請求數。
     pub stt_concurrency: usize,
