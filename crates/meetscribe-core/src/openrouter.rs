@@ -101,8 +101,18 @@ impl OpenRouter {
     }
 
     async fn post_json(&self, path: &str, body: &Value, cancel: &CancellationToken) -> Result<Value> {
+        self.post_json_if(path, body, cancel, Error::is_retryable).await
+    }
+
+    async fn post_json_if(
+        &self,
+        path: &str,
+        body: &Value,
+        cancel: &CancellationToken,
+        retryable: impl Fn(&Error) -> bool,
+    ) -> Result<Value> {
         let url = self.url(path);
-        http::send_with_retry(
+        http::send_with_retry_if(
             || {
                 self.http
                     .post(&url)
@@ -113,7 +123,16 @@ impl OpenRouter {
             self.max_retries,
             path,
             cancel,
+            retryable,
         )
+        .await
+    }
+
+    /// 轉錄請求：供應商逾時（524）不原樣重試，交給流程把音訊切短再送。
+    async fn post_stt(&self, req: &TranscribeRequest<'_>, minimal: bool, cancel: &CancellationToken) -> Result<Value> {
+        self.post_json_if("audio/transcriptions", &self.stt_body(req, minimal), cancel, |e| {
+            e.is_retryable() && !e.is_gateway_timeout()
+        })
         .await
     }
 
@@ -224,18 +243,14 @@ impl Transcriber for OpenRouter {
 
     async fn transcribe(&self, req: TranscribeRequest<'_>, cancel: &CancellationToken) -> Result<SttResult> {
         let minimal = self.stt_minimal.load(Ordering::Relaxed);
-        let v = match self
-            .post_json("audio/transcriptions", &self.stt_body(&req, minimal), cancel)
-            .await
-        {
+        let v = match self.post_stt(&req, minimal, cancel).await {
             Err(Error::Api {
                 status: 400 | 422,
                 message,
             }) if !minimal => {
                 tracing::warn!("轉錄供應商不接受選用參數，改送精簡請求：{message}");
                 self.stt_minimal.store(true, Ordering::Relaxed);
-                self.post_json("audio/transcriptions", &self.stt_body(&req, true), cancel)
-                    .await?
+                self.post_stt(&req, true, cancel).await?
             }
             other => other?,
         };

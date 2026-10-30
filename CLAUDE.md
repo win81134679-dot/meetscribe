@@ -38,6 +38,7 @@
 
 ## 外部事實（會變，動相關程式前重查）
 
+- 20 分鐘一段常被 OpenRouter 回 524（DeepInfra 處理超過閘道等待上限，每次約 2 分鐘才回），同長度重試沒用（2026-10-31 實測 6/8 段連 5 次）。所以轉錄的 524／504／逾時不重試，由 `pipeline::split_chunk` 對半切；預設段長 10 分。
 - OpenRouter 上 Nemotron 唯一供應商 DeepInfra：`supports_diarization: false`、不吃 prompt。所以說話者靠 Gemini 聽音訊分配；`stt_capabilities()` 查到支援時會自動改走原生 diarize。查法：`GET /api/v1/models/<id>/endpoints`。
 - Gemini 模型名稱常改版：`gemini::pick_audio_model` 在設定的名字不存在時挑最新的穩定版 Flash，別把模型名寫死在別處。
 - `claude -p`：不能用 `--bare`（只認 ANTHROPIC_API_KEY，訂閱登入會失敗）；用 `--setting-sources project`＋空工作目錄隔離使用者的 hook／plugin。`total_cost_usd` 是牌價換算，記為 0。

@@ -20,6 +20,17 @@ pub async fn send_with_retry(
     label: &str,
     cancel: &CancellationToken,
 ) -> Result<Value> {
+    send_with_retry_if(build, max_retries, label, cancel, Error::is_retryable).await
+}
+
+/// 同 [`send_with_retry`]，但由 `retryable` 決定哪些錯誤要重試。
+pub async fn send_with_retry_if(
+    build: impl Fn() -> reqwest::RequestBuilder,
+    max_retries: u32,
+    label: &str,
+    cancel: &CancellationToken,
+    retryable: impl Fn(&Error) -> bool,
+) -> Result<Value> {
     let mut attempt = 0u32;
     loop {
         let result = tokio::select! {
@@ -31,7 +42,7 @@ pub async fn send_with_retry(
         };
         match result {
             Ok(v) => return Ok(v),
-            Err((e, retry_after)) if e.is_retryable() && attempt < max_retries => {
+            Err((e, retry_after)) if retryable(&e) && attempt < max_retries => {
                 let backoff = retry_after.unwrap_or_else(|| Duration::from_secs(2u64.pow(attempt + 1).min(60)));
                 tracing::warn!("{label} 第 {} 次失敗，{:?} 後重試：{e}", attempt + 1, backoff);
                 attempt += 1;

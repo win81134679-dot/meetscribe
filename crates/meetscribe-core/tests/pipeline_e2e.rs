@@ -195,6 +195,127 @@ async fn full_pipeline_with_two_chunks() {
     assert!(ev.iter().any(|e| matches!(e, Event::Progress { .. })));
 }
 
+/// 請求本文比 `0` 位元組長才算符合（用來分辨送出的音訊有多長：32 kbps、base64 約每秒 5.3 KB）。
+struct BodyLongerThan(usize);
+
+impl wiremock::Match for BodyLongerThan {
+    fn matches(&self, request: &wiremock::Request) -> bool {
+        request.body.len() > self.0
+    }
+}
+
+async fn stt_requests(server: &MockServer, longer_than: usize) -> usize {
+    server
+        .received_requests()
+        .await
+        .unwrap()
+        .iter()
+        .filter(|r| r.url.path() == "/audio/transcriptions" && r.body.len() > longer_than)
+        .count()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn gateway_timeout_splits_chunk_in_half() {
+    let Ok(ffmpeg) = Ffmpeg::locate("") else { return };
+    let tmp = tempfile::tempdir().unwrap();
+    let paths = AppPaths::at(tmp.path().join("home"));
+    paths.ensure().unwrap();
+    let source = tmp.path().join("長會議.wav");
+    make_audio(&ffmpeg, &source).await;
+
+    let server = mock_openrouter().await;
+    // 整段 300 秒（約 1.6 MB）送出去，供應商一律處理不完回 524；切半之後就正常
+    const WHOLE: usize = 1_300_000;
+    Mock::given(method("POST"))
+        .and(path("/audio/transcriptions"))
+        .and(BodyLongerThan(WHOLE))
+        .respond_with(ResponseTemplate::new(524).set_body_json(serde_json::json!({
+            "error": { "code": 524, "message": "Provider returned 524" }
+        })))
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    let settings = Settings {
+        api_base: server.uri(),
+        google_api_base: format!("{}/gemini", server.uri()),
+        summary_provider: LlmProvider::OpenRouter,
+        chunk_minutes: 4,
+        max_retries: 2,
+        ..Default::default()
+    };
+    let keys = ApiKeys {
+        openrouter: "sk-test".into(),
+        google: Some("AIza-test".into()),
+    };
+    let engine = Engine::from_settings(&paths, settings, keys).await.unwrap();
+    let done = engine
+        .run(Project::new(source, JobOptions::default()), Arc::new(|_| {}), CancellationToken::new())
+        .await;
+
+    assert_eq!(done.status, ProjectStatus::Done, "warnings: {:?}", done.warnings);
+    assert_eq!(done.chunks.len(), 2, "524 的那段要切成兩段");
+    assert!((done.chunks[0].end - 116.5).abs() < 1.5, "在停頓處切：{}", done.chunks[0].end);
+    assert_eq!(done.chunks[1].start, done.chunks[0].end);
+    assert!((done.chunks[1].end - done.duration).abs() < 1e-6);
+    assert_eq!(done.chunks.iter().map(|c| c.index).collect::<Vec<_>>(), vec![0, 1]);
+    // 524 不在同樣長度上重試：整段只送過兩次（第一次 503 重試、第二次 524 就切）
+    assert_eq!(stt_requests(&server, WHOLE).await, 2);
+    assert!((done.usage.stt_usd - 0.008).abs() < 1e-9);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn failed_chunk_keeps_finished_ones() {
+    let Ok(ffmpeg) = Ffmpeg::locate("") else { return };
+    let tmp = tempfile::tempdir().unwrap();
+    let paths = AppPaths::at(tmp.path().join("home"));
+    paths.ensure().unwrap();
+    let source = tmp.path().join("a.wav");
+    make_audio(&ffmpeg, &source).await;
+
+    // 切成 116.5 秒與 183.5 秒兩段；長的那段馬上失敗（不可重試、也不該切），短的晚一點才成功
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/audio/transcriptions"))
+        .and(BodyLongerThan(800_000))
+        .respond_with(ResponseTemplate::new(402).set_body_json(serde_json::json!({
+            "error": { "code": 402, "message": "Insufficient credits" }
+        })))
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/audio/transcriptions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(serde_json::json!({ "text": "大家好。", "usage": { "cost": 0.004 } }))
+                .set_delay(std::time::Duration::from_millis(800)),
+        )
+        .with_priority(2)
+        .mount(&server)
+        .await;
+    let settings = Settings {
+        api_base: server.uri(),
+        chunk_minutes: 2,
+        max_retries: 2,
+        ..Default::default()
+    };
+    let keys = ApiKeys {
+        openrouter: "sk-test".into(),
+        google: None,
+    };
+    let engine = Engine::from_settings(&paths, settings, keys).await.unwrap();
+    let p = engine
+        .run(Project::new(source, JobOptions::default()), Arc::new(|_| {}), CancellationToken::new())
+        .await;
+
+    assert!(matches!(&p.status, ProjectStatus::Failed(m) if m.contains("402")), "{:?}", p.status);
+    assert!(p.status.is_resumable());
+    assert_eq!(p.chunks.len(), 2, "402 不是太長，不該切");
+    assert!(p.chunks[0].stt.is_some(), "另一段要做完並存檔");
+    assert!(p.chunks[1].stt.is_none());
+    assert_eq!(engine.store.load(p.id).unwrap(), p);
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn cancel_marks_project_resumable() {
     let Ok(ffmpeg) = Ffmpeg::locate("") else { return };

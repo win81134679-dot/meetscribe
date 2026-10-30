@@ -299,7 +299,7 @@ pub fn show(app: &mut MeetApp, ui: &mut egui::Ui) {
                     ui.label(theme::bold("把錄音或影片檔拖到這裡", 17.0));
                     ui.label(
                         RichText::new(
-                            "MP3、WAV、M4A、FLAC、OGG、MP4、MKV、MOV… 長度不限，超過 20 分鐘會在停頓處自動分段",
+                            "MP3、WAV、M4A、FLAC、OGG、MP4、MKV、MOV… 長度不限，超過 10 分鐘會在停頓處自動分段",
                         )
                         .color(p.text_muted),
                     );

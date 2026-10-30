@@ -68,7 +68,8 @@ pub struct Settings {
     pub summary_model: String,
     /// 摘要輸出語言；`auto` 表示跟會議主要語言相同。
     pub output_language: String,
-    /// 每段音訊的目標長度（分鐘）。Nemotron 單次上限 60 分。
+    /// 每段音訊的目標長度（分鐘）。Nemotron 單次上限 60 分，但 20 分鐘的段落常讓供應商處理超時（524），
+    /// 所以預設 10 分；還是超時的段落轉錄時會再自動對半切。
     pub chunk_minutes: u32,
     /// 同時送出的轉錄請求數。
     pub stt_concurrency: usize,
@@ -103,7 +104,7 @@ impl Default for Settings {
             summary_model: DEFAULT_SUMMARY_MODEL_GOOGLE.into(),
             claude_cli_path: String::new(),
             output_language: "zh-TW".into(),
-            chunk_minutes: 20,
+            chunk_minutes: 10,
             stt_concurrency: 3,
             request_timeout_secs: 900,
             max_retries: 4,
@@ -255,8 +256,8 @@ mod tests {
 
     #[test]
     fn missing_fields_use_defaults() {
-        let s: Settings = serde_json::from_str(r#"{"chunk_minutes": 10}"#).unwrap();
-        assert_eq!(s.chunk_minutes, 10);
+        let s: Settings = serde_json::from_str(r#"{"chunk_minutes": 15}"#).unwrap();
+        assert_eq!(s.chunk_minutes, 15);
         assert_eq!(s.stt_model, DEFAULT_STT_MODEL);
     }
 

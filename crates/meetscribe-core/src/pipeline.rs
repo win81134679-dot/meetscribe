@@ -27,6 +27,8 @@ use uuid::Uuid;
 const UNIT_MAX_CHARS: usize = 80;
 /// 靜音切點的搜尋範圍（秒）。
 const CUT_WINDOW_SECS: f64 = 90.0;
+/// 比這更短的段落遇到供應商逾時就不再切，直接回報錯誤。
+const MIN_SPLIT_SECS: f64 = 120.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LogLevel {
@@ -337,9 +339,50 @@ impl Engine {
 
     // ---------- 轉錄 ----------
 
+    /// 送出所有還沒轉錄的段落。供應商來不及處理（524）的段落對半切開再送一輪；
+    /// 其他錯誤不中斷別段，等這一輪都回來、做完的存檔之後才回報。
     async fn transcribe(&self, p: &mut Project, ctx: &Ctx<'_>) -> Result<()> {
+        loop {
+            let (too_long, failed) = self.transcribe_pending(p, ctx).await?;
+            ctx.check()?;
+            // 有別的錯誤也先把太長的切好存檔，續跑時直接送短的
+            if !too_long.is_empty() {
+                for &i in too_long.iter().rev() {
+                    self.split_chunk(p, i, ctx).await?;
+                }
+                for (k, c) in p.chunks.iter_mut().enumerate() {
+                    c.index = k;
+                }
+                self.save(p, ctx.sink)?;
+            }
+            if let Some(e) = failed {
+                return Err(e);
+            }
+            if too_long.is_empty() {
+                break;
+            }
+        }
+        let chars: usize = p
+            .chunks
+            .iter()
+            .filter_map(|c| c.stt.as_ref())
+            .map(|s| s.text.chars().count())
+            .sum();
+        if chars == 0 {
+            return Err(Error::Other(
+                "整段錄音沒有辨識到任何語音（請確認音量或語言設定）".into(),
+            ));
+        }
+        ctx.progress(p, Stage::Transcribe, 1.0, "轉錄完成");
+        Ok(())
+    }
+
+    /// 一輪轉錄，做完的段落逐段存檔。回傳太長、要切開重送的段落（由小到大）與第一個其他錯誤。
+    async fn transcribe_pending(&self, p: &mut Project, ctx: &Ctx<'_>) -> Result<(Vec<usize>, Option<Error>)> {
         let pending: Vec<usize> = p.chunks.iter().filter(|c| c.stt.is_none()).map(|c| c.index).collect();
         let total = p.chunks.len();
+        let mut too_long = Vec::new();
+        let mut failed = None;
         if !pending.is_empty() {
             let dir = self.store.dir(p.id);
             let language = p.options.language.clone();
@@ -358,22 +401,47 @@ impl Engine {
                 let language = language.clone();
                 let keyterms = keyterms.clone();
                 async move {
-                    let bytes = tokio::fs::read(&path).await?;
-                    let req = TranscribeRequest {
-                        audio: &bytes,
-                        format: NORMALIZED_FORMAT,
-                        language: language.as_deref(),
-                        keyterms: &keyterms,
-                        diarize,
+                    let r = async {
+                        let bytes = tokio::fs::read(&path).await?;
+                        let req = TranscribeRequest {
+                            audio: &bytes,
+                            format: NORMALIZED_FORMAT,
+                            language: language.as_deref(),
+                            keyterms: &keyterms,
+                            diarize,
+                        };
+                        self.transcriber.transcribe(req, ctx.cancel).await
                     };
-                    let r = self.transcriber.transcribe(req, ctx.cancel).await;
-                    Ok::<_, Error>((i, r?))
+                    (i, r.await)
                 }
             });
             let mut stream = futures::stream::iter(jobs).buffer_unordered(self.settings.stt_concurrency.max(1));
             let mut done = done_before;
-            while let Some(r) = stream.next().await {
-                let (i, stt) = r?;
+            while let Some((i, r)) = stream.next().await {
+                let stt = match r {
+                    Ok(stt) => stt,
+                    Err(e) if e.is_gateway_timeout() && p.chunks[i].duration() > MIN_SPLIT_SECS => {
+                        ctx.log(
+                            p,
+                            LogLevel::Warn,
+                            format!(
+                                "第 {}/{} 段（{}）太長，供應商來不及處理（{e}），切成兩段重送",
+                                i + 1,
+                                total,
+                                fmt_clock(p.chunks[i].duration())
+                            ),
+                        );
+                        too_long.push(i);
+                        continue;
+                    }
+                    Err(e) => {
+                        if !matches!(e, Error::Cancelled) {
+                            ctx.log(p, LogLevel::Warn, format!("第 {}/{} 段轉錄失敗：{e}", i + 1, total));
+                        }
+                        failed.get_or_insert(e);
+                        continue;
+                    }
+                };
                 done += 1;
                 p.usage.stt_usd += stt.cost;
                 p.usage.stt_seconds += if stt.seconds > 0.0 {
@@ -396,18 +464,45 @@ impl Engine {
                 );
             }
         }
-        let chars: usize = p
-            .chunks
-            .iter()
-            .filter_map(|c| c.stt.as_ref())
-            .map(|s| s.text.chars().count())
-            .sum();
-        if chars == 0 {
-            return Err(Error::Other(
-                "整段錄音沒有辨識到任何語音（請確認音量或語言設定）".into(),
-            ));
+        too_long.sort_unstable();
+        Ok((too_long, failed))
+    }
+
+    /// 把第 `i` 段在中點附近的停頓切成兩段（換成兩筆新的 [`ChunkRecord`]，序號由呼叫端重排）。
+    async fn split_chunk(&self, p: &mut Project, i: usize, ctx: &Ctx<'_>) -> Result<()> {
+        let dir = self.store.dir(p.id);
+        let old = p.chunks[i].clone();
+        let src = dir.join(&old.file);
+        let dur = old.duration();
+        let silences = self
+            .ffmpeg
+            .detect_silences(&src, -35, 0.4, ctx.cancel)
+            .await
+            .unwrap_or_default();
+        let plan = audio::plan_chunks(dur, &silences, dur / 2.0, (dur / 6.0).min(CUT_WINDOW_SECS));
+        let cut = if plan.len() >= 2 { plan[0].1 } else { dur / 2.0 };
+        let mut halves = Vec::with_capacity(2);
+        for (from, to) in [(0.0, cut), (cut, dur)] {
+            let (start, end) = (old.start + from, old.start + to);
+            let rel = format!(
+                "chunks/part_{:09}_{:09}.{NORMALIZED_EXT}",
+                (start * 1000.0).round() as u64,
+                (end * 1000.0).round() as u64
+            );
+            self.ffmpeg.extract(&src, from, to, &dir.join(&rel)).await?;
+            halves.push(ChunkRecord {
+                index: i,
+                start,
+                end,
+                file: rel,
+                stt: None,
+                attributed: false,
+            });
         }
-        ctx.progress(p, Stage::Transcribe, 1.0, "轉錄完成");
+        if old.file.starts_with("chunks/") {
+            let _ = std::fs::remove_file(&src);
+        }
+        p.chunks.splice(i..=i, halves);
         Ok(())
     }
 

@@ -36,6 +36,16 @@ impl Error {
             _ => false,
         }
     }
+
+    /// 供應商來不及處理完就被切斷（OpenRouter 的 524／504、本機等到逾時）。
+    /// 同樣長度重送多半還是一樣，轉錄時改成把音訊切短再送。
+    pub fn is_gateway_timeout(&self) -> bool {
+        match self {
+            Error::Api { status, .. } => matches!(status, 504 | 524),
+            Error::Http(e) => e.is_timeout(),
+            _ => false,
+        }
+    }
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
