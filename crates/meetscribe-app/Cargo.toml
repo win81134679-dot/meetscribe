@@ -1,6 +1,6 @@
 [package]
 name = "meetscribe-app"
-version = "1.1.1"
+version = "1.2.0"
 edition = "2024"
 license.workspace = true
 
@@ -10,7 +10,7 @@ eframe = "0.37.0"
 egui = "0.37.0"
 egui_commonmark = "0.26.0"
 egui_extras = "0.37.0"
-meetscribe-core = { version = "1.1.1", path = "../meetscribe-core" }
+meetscribe-core = { version = "1.2.0", path = "../meetscribe-core" }
 open = "5.4.5"
 rfd = "0.17.2"
 rodio = "0.23.0"

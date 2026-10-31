@@ -79,8 +79,9 @@ class MainActivity : ComponentActivity() {
 }
 
 private enum class Tab(val label: String, val icon: ImageVector) {
-    New("新增轉錄", Ic.Mic),
+    New("新增轉錄", Ic.Add),
     Projects("會議記錄", Ic.List),
+    Recordings("錄音管理", Ic.Mic),
     Settings("設定", Ic.Settings),
 }
 
@@ -91,6 +92,8 @@ private fun AppRoot(incoming: Uri?, onIncomingHandled: () -> Unit, jump: String?
     // 使用者定的入口：一律從「新增轉錄」開始
     var tab by rememberSaveable { mutableStateOf(Tab.New) }
     var openProject by rememberSaveable { mutableStateOf<String?>(null) }
+    /** 錄音管理裡打開的那段錄音（[io.github.win81134679.meetscribe.core.RecordingItem.key]）；會議頁可以疊在它上面。 */
+    var openRecording by rememberSaveable { mutableStateOf<String?>(null) }
     val snackbar = remember { SnackbarHostState() }
 
     LaunchedEffect(Unit) {
@@ -99,23 +102,25 @@ private fun AppRoot(incoming: Uri?, onIncomingHandled: () -> Unit, jump: String?
     LaunchedEffect(incoming) {
         if (incoming != null) {
             openProject = null
+            openRecording = null
             tab = Tab.New
         }
     }
     LaunchedEffect(jump) {
         when (jump) {
             null -> return@LaunchedEffect
-            SETTINGS -> { openProject = null; tab = Tab.Settings }
+            SETTINGS -> { openProject = null; openRecording = null; tab = Tab.Settings }
             else -> openProject = jump
         }
         onJumpHandled()
     }
     BackHandler(enabled = openProject != null) { openProject = null }
+    BackHandler(enabled = openProject == null && openRecording != null) { openRecording = null }
 
     Scaffold(
         snackbarHost = { SnackbarHost(snackbar) },
         bottomBar = {
-            if (openProject == null) {
+            if (openProject == null && openRecording == null) {
                 NavigationBar {
                     for (t in Tab.entries) {
                         NavigationBarItem(
@@ -134,6 +139,16 @@ private fun AppRoot(incoming: Uri?, onIncomingHandled: () -> Unit, jump: String?
             when {
                 err != null -> InitError(err)
                 openProject != null -> ProjectScreen(openProject!!, onBack = { openProject = null })
+                openRecording != null -> RecordingScreen(
+                    openRecording!!,
+                    onBack = { openRecording = null },
+                    onOpenMeeting = { openProject = it },
+                    onTranscribe = { item ->
+                        useRecordingForNewJob(item)
+                        openRecording = null
+                        tab = Tab.New
+                    },
+                )
                 tab == Tab.New -> NewJobScreen(
                     incoming = incoming,
                     onIncomingHandled = onIncomingHandled,
@@ -141,6 +156,7 @@ private fun AppRoot(incoming: Uri?, onIncomingHandled: () -> Unit, jump: String?
                     onOpenSettings = { tab = Tab.Settings },
                 )
                 tab == Tab.Projects -> ProjectsScreen(onOpen = { openProject = it })
+                tab == Tab.Recordings -> RecordingsScreen(onOpen = { openRecording = it.key })
                 else -> SettingsScreen()
             }
         }

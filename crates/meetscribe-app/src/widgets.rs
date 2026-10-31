@@ -167,7 +167,7 @@ pub fn export_options(
         theme::hint(ui, &format!("可用 {}；日期、時間是開始轉錄的時間。", export::FILENAME_TOKENS));
         ui.add_space(6.0);
 
-        let l = theme::label(ui, "Word、Markdown、純文字的內容");
+        let l = theme::label(ui, "Markdown、純文字的內容（Word、PDF 只放摘要）");
         egui::ComboBox::from_id_salt(format!("{id}_content"))
             .selected_text(o.content.label())
             .width(260.0)

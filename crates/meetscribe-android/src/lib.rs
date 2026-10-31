@@ -5,6 +5,7 @@
 //! 協定見 [`bridge`]。這裡只做 JNI 轉接與攔 panic（panic 穿過 JNI 會讓整個 App 閃退）。
 
 pub mod bridge;
+pub mod recordings;
 
 use bridge::Bridge;
 use jni::JNIEnv;

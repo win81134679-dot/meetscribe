@@ -1,7 +1,5 @@
 package io.github.win81134679.meetscribe.ui
 
-import android.Manifest
-import android.content.pm.PackageManager
 import android.net.Uri
 import android.util.Log
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -37,10 +35,10 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
-import androidx.core.content.ContextCompat
 import io.github.win81134679.meetscribe.core.AudioImport
 import io.github.win81134679.meetscribe.core.ImportedAudio
 import io.github.win81134679.meetscribe.core.ProjectDetail
+import io.github.win81134679.meetscribe.core.RecordingItem
 import io.github.win81134679.meetscribe.core.Repo
 import io.github.win81134679.meetscribe.core.formatClock
 import io.github.win81134679.meetscribe.service.Recording
@@ -112,36 +110,19 @@ fun NewJobScreen(
 
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri -> uri?.let(::importUri) }
     val rec by Recording.state.collectAsState()
-    val askMic = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
-        if (granted) Recording.start(ctx) else scope.launch { Repo.toasts.emit(true to "沒有麥克風權限，無法錄音") }
-    }
-    fun startRecording() {
-        if (ContextCompat.checkSelfPermission(ctx, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
-            Recording.start(ctx)
-        } else {
-            askMic.launch(Manifest.permission.RECORD_AUDIO)
-        }
-    }
-    // 錄完：當成選好的錄音（標題預設「會議錄音 日期 時間」）
+    val startRecording = rememberStartRecording(transcribe = true)
+    // 錄完（已存進錄音管理）：當成選好的錄音（標題預設「會議錄音 日期 時間」）
     LaunchedEffect(Unit) {
-        Recording.finished.collect { (file, name) ->
+        Recording.finished.collect { item ->
             @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
             Recording.finished.resetReplayCache()
-            d.audio?.let(AudioImport::discard)
-            d.audio = null
-            d.cost = null
-            d.status = "讀取錄音…"
-            try {
-                val a = AudioImport.fromFile(file, "$name.m4a")
-                d.audio = a
-                if (d.title.isBlank()) d.title = name
-                d.status = null
-                d.cost = (Repo.tryCall("estimate_cost", "duration" to a.duration) as? Number)?.toDouble()
-            } catch (e: Exception) {
-                d.status = null
-                Repo.toasts.emit(true to (e.message ?: "讀不到錄好的音檔"))
-            }
+            useRecordingForNewJob(item)
         }
+    }
+    // 從錄音管理帶過來的錄音還沒估價
+    LaunchedEffect(d.audio) {
+        val a = d.audio
+        if (a != null && d.cost == null) d.cost = (Repo.tryCall("estimate_cost", "duration" to a.duration) as? Number)?.toDouble()
     }
     LaunchedEffect(incoming) {
         if (incoming != null) {
@@ -163,7 +144,7 @@ fun NewJobScreen(
 
         if (!hasKey) SetupCard(onOpenSettings) else AccountRow()
 
-        SectionCard("錄音檔", "現場錄音，或選手機裡的錄音、影片（m4a、mp3、wav、aac、ogg、opus、amr、mp4…）。") {
+        SectionCard("錄音檔", "現場錄音（自動存進「錄音管理」），或選手機裡的錄音、影片（m4a、mp3、wav、aac、ogg、opus、amr、mp4…）。") {
             val a = d.audio
             when {
                 rec.phase != Recording.Phase.Idle -> RecordingPanel()
@@ -264,6 +245,30 @@ fun NewJobScreen(
 }
 
 private fun lines(s: String) = s.lines().map { it.trim() }.filter { it.isNotEmpty() }
+
+/**
+ * 錄音管理的錄音（或剛錄好的）當成選好的錄音。檔案留在錄音庫，不複製；之前選的匯入檔丟掉（錄音庫的不會被丟）。
+ */
+/** 錄音管理刪掉了「新增轉錄」正選著的那段錄音：表單上的錄音清掉（標題等其他欄位留著）。 */
+fun forgetRecordingInNewJob(path: String) {
+    if (Draft.audio?.file?.absolutePath == path) {
+        Draft.audio = null
+        Draft.cost = null
+    }
+}
+
+fun useRecordingForNewJob(item: RecordingItem) {
+    val f = item.file
+    if (f == null || item.broken) {
+        Repo.toasts.tryEmit(true to "這段錄音不完整，無法轉錄")
+        return
+    }
+    Draft.audio?.let(AudioImport::discard)
+    Draft.audio = ImportedAudio(f, "${item.title}.${item.ext ?: f.extension}", item.duration)
+    Draft.title = item.title
+    Draft.cost = null
+    Draft.status = null
+}
 
 /** 短錄音的費用常常不到一分錢，用兩位小數會顯示成 US$0.00。 */
 fun formatUsd(v: Double): String = when {

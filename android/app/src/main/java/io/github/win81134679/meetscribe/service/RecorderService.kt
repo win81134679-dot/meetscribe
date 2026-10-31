@@ -15,6 +15,7 @@ import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
 import androidx.core.content.ContextCompat
 import io.github.win81134679.meetscribe.R
+import io.github.win81134679.meetscribe.core.RecordingItem
 import io.github.win81134679.meetscribe.core.Repo
 import io.github.win81134679.meetscribe.ui.MainActivity
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -40,17 +41,23 @@ object Recording {
     }
 
     val state = MutableStateFlow(State())
-    /** 錄完（按「停止」）的檔案：新增轉錄頁收到就當成選好的錄音。 */
-    val finished = MutableSharedFlow<Pair<File, String>>(replay = 1, extraBufferCapacity = 1)
+    /** 從「新增轉錄」錄完（按「停止」）的錄音：那頁收到就當成選好的錄音。錄音管理錄的不會發。 */
+    val finished = MutableSharedFlow<RecordingItem>(replay = 1, extraBufferCapacity = 1)
 
     internal var recorder: MediaRecorder? = null
     internal var file: File? = null
     internal var name: String = ""
+    /** 這次錄完要直接拿去轉錄（從「新增轉錄」開始錄的）。 */
+    internal var transcribeAfter = true
 
     /** 目前音量 0..1（畫面上的音量條）。 */
     fun level(): Float = runCatching { (recorder?.maxAmplitude ?: 0) / 32767f }.getOrDefault(0f).coerceIn(0f, 1f)
 
-    fun start(ctx: Context) = send(ctx, RecorderService.ACTION_START)
+    /** `transcribe`：錄完直接帶進「新增轉錄」；false＝只存進錄音管理。 */
+    fun start(ctx: Context, transcribe: Boolean) {
+        transcribeAfter = transcribe
+        send(ctx, RecorderService.ACTION_START)
+    }
     fun pause(ctx: Context) = send(ctx, RecorderService.ACTION_PAUSE)
     fun resume(ctx: Context) = send(ctx, RecorderService.ACTION_RESUME)
     fun stop(ctx: Context) = send(ctx, RecorderService.ACTION_STOP)
@@ -64,7 +71,8 @@ object Recording {
 
 /**
  * App 內錄音（2026-10-31：「更多貼心設計等你設計」——手機本身就是錄音機，錄完直接轉錄）。
- * AAC／M4A 單聲道 44.1 kHz 64 kbps（一小時約 29 MB），檔案直接寫在匯入資料夾，錄完不必再複製。
+ * AAC／M4A 單聲道 44.1 kHz 64 kbps（一小時約 29 MB），檔案直接寫在錄音庫（`recordings/<uuid>/`，永久保存；
+ * 2026-10-31 起，1.1 寫在匯入區、沒轉錄就會被清掉），錄完登記進「錄音管理」。
  * 前景服務（microphone）讓關螢幕也繼續錄；通知列顯示「錄音中」並可點回 App。
  */
 class RecorderService : Service() {
@@ -88,7 +96,7 @@ class RecorderService : Service() {
         ServiceCompat.startForeground(this, NOTIFICATION_ID, notification("錄音中"), type)
         val stamp = SimpleDateFormat("yyyy-MM-dd HHmm", Locale.TAIWAN).format(Date())
         val name = "會議錄音 $stamp"
-        val dir = File(Repo.importsDir, UUID.randomUUID().toString()).apply { mkdirs() }
+        val dir = File(Repo.recordingsDir, UUID.randomUUID().toString()).apply { mkdirs() }
         val file = File(dir, "$name.m4a")
         val rec = (if (Build.VERSION.SDK_INT >= 31) MediaRecorder(this) else @Suppress("DEPRECATION") MediaRecorder())
         try {
@@ -142,7 +150,7 @@ class RecorderService : Service() {
         Recording.state.value = Recording.State()
         if (file != null) {
             if (keep && ok && file.length() > 0) {
-                Recording.finished.tryEmit(file to Recording.name)
+                Repo.recordingStopped(file, Recording.name, Recording.transcribeAfter)
             } else {
                 file.parentFile?.deleteRecursively()
                 if (keep) Repo.toasts.tryEmit(true to "錄音太短或沒有錄到聲音")

@@ -82,6 +82,7 @@ fun ProjectScreen(id: String, onBack: () -> Unit) {
     var menu by remember { mutableStateOf(false) }
     var renaming by remember { mutableStateOf(false) }
     var confirmDelete by remember { mutableStateOf(false) }
+    val ctx = LocalContext.current
 
     LaunchedEffect(id) {
         p = Repo.loadProject(id)
@@ -110,6 +111,14 @@ fun ProjectScreen(id: String, onBack: () -> Unit) {
                             text = { Text("重新辨識說話者") },
                             enabled = !busy && (p?.chunksTotal ?: 0) > 0,
                             onClick = { menu = false; scope.launch { Repo.tryCall("reidentify", "id" to id) } },
+                        )
+                        DropdownMenuItem(
+                            text = { Text("分享錄音檔") },
+                            enabled = p?.audioPath != null,
+                            onClick = {
+                                menu = false
+                                p?.let { d -> scope.launch { shareRecording(ctx, d) } }
+                            },
                         )
                         DropdownMenuItem(
                             text = { Text("刪除這場會議", color = Pal.current.danger) },
@@ -147,70 +156,87 @@ fun ProjectScreen(id: String, onBack: () -> Unit) {
             scope.launch { Repo.edit("rename_project", "id" to id, "title" to t) }
         }
     }
-    if (confirmDelete) {
-        val ctx = LocalContext.current
-        val exported = p?.exportFiles.orEmpty()
-        // 預設勾：大部分人不會自己去資料夾刪（2026-10-31 使用者）
-        var alsoFiles by remember { mutableStateOf(true) }
-        val where = exported.firstOrNull()?.let { File(it).parentFile }?.let(Storage::displayPath)
-        AlertDialog(
-            onDismissRequest = { confirmDelete = false },
-            title = { Text("刪除這場會議？") },
-            text = {
-                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    Text("逐字稿、摘要、轉好的音檔都會刪除，無法復原。")
-                    if (exported.isNotEmpty()) {
-                        Row(
-                            Modifier.fillMaxWidth().clip(RoundedCornerShape(8.dp))
-                                .clickable(role = Role.Checkbox) { alsoFiles = !alsoFiles },
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            Checkbox(checked = alsoFiles, onCheckedChange = null)
-                            Spacer(Modifier.width(8.dp))
-                            Column {
-                                Text("同時刪除已匯出到手機的 ${exported.size} 個檔案")
-                                if (where != null) {
-                                    Text(where, color = Pal.current.textMuted, style = MaterialTheme.typography.bodySmall)
-                                }
+    if (confirmDelete && p != null) {
+        DeleteMeetingDialog(p!!, onDismiss = { confirmDelete = false }) {
+            confirmDelete = false
+            Repo.refreshProjects()
+            onBack()
+        }
+    }
+}
+
+/**
+ * 刪除會議的確認（會議頁、錄音管理共用）。「同時刪除已匯出到手機的檔案」預設勾（2026-10-31 使用者：大部分人不會自己去資料夾刪），
+ * 匯出的錄音也算在內。`onDeleted` 在刪除成功後呼叫。
+ */
+@Composable
+fun DeleteMeetingDialog(p: ProjectDetail, onDismiss: () -> Unit, onDeleted: suspend () -> Unit) {
+    val ctx = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val exported = p.exportFiles
+    var alsoFiles by remember { mutableStateOf(true) }
+    val where = exported.firstOrNull()?.let { File(it).parentFile }?.let(Storage::displayPath)
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("刪除這場會議？") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text(
+                    if (p.keepsRecording) "逐字稿、摘要會刪除，無法復原；錄音仍保留在「錄音管理」。"
+                    else "逐字稿、摘要與錄音都會刪除，無法復原。",
+                )
+                if (exported.isNotEmpty()) {
+                    Row(
+                        Modifier.fillMaxWidth().clip(RoundedCornerShape(8.dp))
+                            .clickable(role = Role.Checkbox) { alsoFiles = !alsoFiles },
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Checkbox(checked = alsoFiles, onCheckedChange = null)
+                        Spacer(Modifier.width(8.dp))
+                        Column {
+                            Text("同時刪除已匯出到手機的 ${exported.size} 個檔案")
+                            if (where != null) {
+                                Text(where, color = Pal.current.textMuted, style = MaterialTheme.typography.bodySmall)
                             }
                         }
-                        if (!alsoFiles) {
-                            Text("匯出的 Word、Markdown、字幕檔會留在手機上。", color = Pal.current.textMuted, style = MaterialTheme.typography.bodySmall)
-                        }
+                    }
+                    if (!alsoFiles) {
+                        Text("匯出的 Word、PDF、字幕與錄音檔會留在手機上。", color = Pal.current.textMuted, style = MaterialTheme.typography.bodySmall)
+                    }
+                } else {
+                    Text("這場會議沒有匯出到手機的檔案。", color = Pal.current.textMuted, style = MaterialTheme.typography.bodySmall)
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = {
+                val withFiles = alsoFiles && exported.isNotEmpty()
+                scope.launch {
+                    // 成功的回傳值是 {deleted, failed}；失敗丟 BridgeError，所以用 runCatching 判斷成敗
+                    val r = runCatching { Repo.call("delete_project", "id" to p.id, "delete_exports" to withFiles) as? JSONObject }
+                        .onFailure { Repo.toasts.emit(true to (it.message ?: "刪除失敗")) }
+                    if (r.isSuccess) {
+                        val res = r.getOrNull()
+                        val deleted = res?.optJSONArray("deleted").strings()
+                        val failed = res?.optJSONArray("failed").strings()
+                        Storage.forget(ctx, deleted)
+                        Repo.toasts.emit(
+                            when {
+                                failed.isNotEmpty() -> true to "會議已刪除；有 ${failed.size} 個匯出檔刪不掉，請到「檔案」App 手動刪除"
+                                deleted.isNotEmpty() -> false to "已刪除會議與 ${deleted.size} 個匯出檔"
+                                else -> false to "已刪除會議"
+                            },
+                        )
+                        Repo.refreshRecordingsLater()
+                        onDeleted()
                     } else {
-                        Text("這場會議沒有匯出到手機的檔案。", color = Pal.current.textMuted, style = MaterialTheme.typography.bodySmall)
+                        onDismiss()
                     }
                 }
-            },
-            confirmButton = {
-                TextButton(onClick = {
-                    confirmDelete = false
-                    val withFiles = alsoFiles && exported.isNotEmpty()
-                    scope.launch {
-                        // 成功的回傳值是 {deleted, failed}；失敗丟 BridgeError，所以用 runCatching 判斷成敗
-                        val r = runCatching { Repo.call("delete_project", "id" to id, "delete_exports" to withFiles) as? JSONObject }
-                            .onFailure { Repo.toasts.emit(true to (it.message ?: "刪除失敗")) }
-                        if (r.isSuccess) {
-                            val res = r.getOrNull()
-                            val deleted = res?.optJSONArray("deleted").strings()
-                            val failed = res?.optJSONArray("failed").strings()
-                            Storage.forget(ctx, deleted)
-                            Repo.toasts.emit(
-                                when {
-                                    failed.isNotEmpty() -> true to "會議已刪除；有 ${failed.size} 個匯出檔刪不掉，請到「檔案」App 手動刪除"
-                                    deleted.isNotEmpty() -> false to "已刪除會議與 ${deleted.size} 個匯出檔"
-                                    else -> false to "已刪除會議"
-                                },
-                            )
-                            Repo.refreshProjects()
-                            onBack()
-                        }
-                    }
-                }) { Text("刪除", color = Pal.current.danger) }
-            },
-            dismissButton = { TextButton(onClick = { confirmDelete = false }) { Text("取消") } },
-        )
-    }
+            }) { Text("刪除", color = Pal.current.danger) }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
+    )
 }
 
 @Composable
@@ -270,43 +296,6 @@ private fun StatusPanel(p: ProjectDetail, busy: Boolean) {
 
 // ---------- 逐字稿 ----------
 
-private class Player(val mp: MediaPlayer?) {
-    var playing by mutableStateOf(false)
-    var position by mutableFloatStateOf(0f)
-    val duration: Float get() = (mp?.duration ?: 0) / 1000f
-
-    fun playFrom(secs: Double) {
-        val m = mp ?: return
-        m.seekTo((secs * 1000).toLong(), MediaPlayer.SEEK_CLOSEST)
-        m.start()
-        playing = true
-    }
-
-    fun toggle() {
-        val m = mp ?: return
-        if (m.isPlaying) m.pause() else m.start()
-        playing = m.isPlaying
-    }
-}
-
-@Composable
-private fun rememberPlayer(path: String?): Player {
-    val player = remember(path) {
-        Player(path?.takeIf { File(it).isFile }?.let { runCatching { MediaPlayer().apply { setDataSource(it); prepare() } }.getOrNull() })
-    }
-    DisposableEffect(player) {
-        player.mp?.setOnCompletionListener { player.playing = false }
-        onDispose { player.mp?.release() }
-    }
-    LaunchedEffect(player) {
-        while (true) {
-            player.mp?.let { if (player.playing) player.position = it.currentPosition / 1000f }
-            delay(250)
-        }
-    }
-    return player
-}
-
 @Composable
 private fun TranscriptTab(p: ProjectDetail, busy: Boolean, player: Player) {
     val pal = Pal.current
@@ -326,21 +315,7 @@ private fun TranscriptTab(p: ProjectDetail, busy: Boolean, player: Player) {
             }
         }
         if (player.mp != null) {
-            Row(
-                Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                IconButton(onClick = { player.toggle() }) {
-                    Icon(if (player.playing) Ic.Pause else Ic.Play, contentDescription = if (player.playing) "暫停" else "播放")
-                }
-                Slider(
-                    value = player.position.coerceIn(0f, player.duration.coerceAtLeast(1f)),
-                    onValueChange = { player.position = it; player.mp.seekTo((it * 1000).toLong(), MediaPlayer.SEEK_CLOSEST) },
-                    valueRange = 0f..player.duration.coerceAtLeast(1f),
-                    modifier = Modifier.weight(1f),
-                )
-                Text(formatClock(player.position.toDouble()), style = MaterialTheme.typography.bodySmall, color = pal.textMuted)
-            }
+            PlayerBar(player, Modifier.padding(horizontal = 12.dp, vertical = 4.dp))
         }
         if (p.segments.isEmpty()) {
             Box(Modifier.fillMaxSize().padding(24.dp), contentAlignment = Alignment.Center) {
@@ -576,11 +551,12 @@ private fun ExportTab(p: ProjectDetail) {
                     Text("${e.label}（.${e.extension}）")
                 }
             }
-            SelectRow("內容", Repo.contents.map { it.id to it.label }, opts.optString("content", "Both")) { update { put("content", it) } }
+            SelectRow("Markdown／純文字內容", Repo.contents.map { it.id to it.label }, opts.optString("content", "Both")) { update { put("content", it) } }
             SwitchRow("時間戳記", opts.optBoolean("timestamps", true)) { v -> update { put("timestamps", v) } }
             SwitchRow("標出說話者", opts.optBoolean("speaker_names", true)) { v -> update { put("speaker_names", v) } }
             SwitchRow("同一人連續發言併成一段", opts.optBoolean("merge_turns", true)) { v -> update { put("merge_turns", v) } }
             SwitchRow("開頭附檔案資訊與發言統計", opts.optBoolean("header", true)) { v -> update { put("header", v) } }
+            SwitchRow("附上錄音檔", opts.optBoolean("audio", true), "會議資料夾多放一份錄音，跟 Word、字幕放一起") { v -> update { put("audio", v) } }
         }
         IconLabelButton(null, if (working) "匯出中…" else "匯出", primary = true, enabled = !working && formats.isNotEmpty()) {
             working = true
@@ -611,6 +587,9 @@ private fun ExportTab(p: ProjectDetail) {
                         }
                     }
                     IconLabelButton(Ic.Share, "全部分享", enabled = listed.isNotEmpty()) { Files.share(ctx, listed) }
+                    if (p.audioPath != null) {
+                        IconLabelButton(Ic.Mic, "分享錄音檔") { scope.launch { shareRecording(ctx, p) } }
+                    }
                 }
                 Text(
                     "也可以在「檔案」App 的「文件 › 語音轉錄」找到；手機接電腦時在「Documents\\語音轉錄」。",
@@ -668,6 +647,16 @@ fun TextInputDialog(
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
     )
+}
+
+/** 分享這場會議的錄音（LINE、雲端硬碟…）：檔名用會議名稱。 */
+private suspend fun shareRecording(ctx: android.content.Context, p: ProjectDetail) {
+    val f = p.audioPath?.let(::File)?.takeIf { it.isFile }
+    if (f == null) {
+        Repo.toasts.emit(true to "找不到這場會議的錄音檔")
+        return
+    }
+    runCatching { Files.shareAudio(ctx, f, p.summary.title) }.onFailure { Repo.toasts.emit(true to "無法分享：${it.message}") }
 }
 
 /** 複製用的逐字稿全文：[時間] 說話者：內容，一段一行。 */

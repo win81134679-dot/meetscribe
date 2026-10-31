@@ -1,8 +1,12 @@
 package io.github.win81134679.meetscribe.ui
 
+import android.Manifest
 import android.content.ClipData
 import android.content.Context
 import android.content.ClipboardManager
+import android.content.pm.PackageManager
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -36,6 +40,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.core.content.ContextCompat
 import io.github.win81134679.meetscribe.core.Repo
 import io.github.win81134679.meetscribe.core.UpdateUi
 import io.github.win81134679.meetscribe.core.Updater
@@ -111,7 +116,23 @@ fun AboutUpdateCard(autoUpdate: Boolean, onAutoUpdate: (Boolean) -> Unit) {
     }
 }
 
-/** 錄音中：計時、音量、暫停／繼續、停止並使用、捨棄。 */
+/** 開始錄音（第一次先要麥克風權限）。`transcribe`：錄完直接帶進「新增轉錄」；false＝只存進錄音管理。 */
+@Composable
+fun rememberStartRecording(transcribe: Boolean): () -> Unit {
+    val ctx = LocalContext.current
+    val askMic = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        if (granted) Recording.start(ctx, transcribe) else Repo.toasts.tryEmit(true to "沒有麥克風權限，無法錄音")
+    }
+    return {
+        if (ContextCompat.checkSelfPermission(ctx, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
+            Recording.start(ctx, transcribe)
+        } else {
+            askMic.launch(Manifest.permission.RECORD_AUDIO)
+        }
+    }
+}
+
+/** 錄音中：計時、音量、暫停／繼續、停止、捨棄。錄好的都會存進「錄音管理」。 */
 @Composable
 fun RecordingPanel() {
     val ctx = LocalContext.current
@@ -141,9 +162,9 @@ fun RecordingPanel() {
     LinearProgressIndicator(
         progress = { if (recording) level else 0f }, modifier = Modifier.fillMaxWidth().height(6.dp),
     )
-    Text("關掉螢幕、切到別的 App 都會繼續錄。", color = pal.textMuted, style = MaterialTheme.typography.bodySmall)
+    Text("關掉螢幕、切到別的 App 都會繼續錄；錄好的會存在「錄音管理」。", color = pal.textMuted, style = MaterialTheme.typography.bodySmall)
     FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        IconLabelButton(Ic.Stop, "停止並使用", primary = true) { Recording.stop(ctx) }
+        IconLabelButton(Ic.Stop, if (Recording.transcribeAfter) "停止並使用" else "停止並儲存", primary = true) { Recording.stop(ctx) }
         if (recording) {
             IconLabelButton(Ic.Pause, "暫停") { Recording.pause(ctx) }
         } else {

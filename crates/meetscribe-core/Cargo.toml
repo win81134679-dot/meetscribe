@@ -1,6 +1,6 @@
 [package]
 name = "meetscribe-core"
-version = "1.1.1"
+version = "1.2.0"
 edition = "2024"
 license.workspace = true
 
@@ -25,6 +25,9 @@ symphonia = { version = "0.5.5", optional = true, default-features = false, feat
 mp3lame-encoder = { version = "0.2.5", optional = true }
 p256 = "0.14.0"
 sha2 = "0.11.1"
+# PDF 匯出（照 Word 版面畫，電腦與手機都能產；字型用系統的中文字型，自動子集化）
+krilla = { version = "0.8.2", default-features = false, features = ["simple-text"] }
+ttf-parser = "0.25.1"
 
 [features]
 native-audio = ["dep:symphonia", "dep:mp3lame-encoder"]

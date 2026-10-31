@@ -2,6 +2,7 @@ package io.github.win81134679.meetscribe.core
 
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.File
 
 /** Rust 端 bridge.rs 的 summary_view／full_view 轉成 Kotlin。欄位名稱是兩邊的契約。 */
 data class ProjectSummary(
@@ -76,6 +77,8 @@ data class ProjectDetail(
     val folder: String?,
     /** 匯出到手機、還在的檔（刪除會議時可一起刪）。 */
     val exportFiles: List<String>,
+    /** 原始檔是錄音管理裡的錄音（還沒處理完）：刪掉會議後錄音還在。 */
+    val keepsRecording: Boolean,
 ) {
     val id get() = summary.id
 
@@ -116,8 +119,62 @@ data class ProjectDetail(
                 options = o.optJSONObject("options") ?: JSONObject(),
                 folder = o.optStringOrNull("folder"),
                 exportFiles = o.optJSONArray("export_files").strings(),
+                keepsRecording = o.optBoolean("keeps_recording"),
             )
         }
+    }
+}
+
+/**
+ * 錄音管理頁的一列（bridge.rs 的 recording_view／meeting_recording_view）：
+ * kind = recording（App 錄的、還沒轉錄）或 meeting（一場會議的錄音）。
+ */
+data class RecordingItem(
+    val kind: String,
+    val id: String,
+    /** 已建會議的話是那場會議的 ID。 */
+    val projectId: String?,
+    val title: String,
+    val createdAt: String,
+    val duration: Double,
+    val size: Long,
+    val path: String?,
+    val ext: String?,
+    /** untranscribed／queued／running／done／failed／cancelled */
+    val status: String,
+    val statusLabel: String,
+    val busy: Boolean,
+    /** 檔案不完整（錄到一半 App 被系統關掉），播不了。 */
+    val broken: Boolean,
+    val segments: Int,
+    val hasSummary: Boolean,
+    val speakers: Int,
+) {
+    val isMeeting get() = kind == "meeting"
+    /** 畫面導覽用的鍵（兩種的 ID 可能撞號，所以帶種類）。 */
+    val key get() = "$kind:$id"
+    val file: File? get() = path?.let(::File)?.takeIf { it.isFile }
+    val playable get() = !broken && file != null
+
+    companion object {
+        fun from(o: JSONObject) = RecordingItem(
+            kind = o.optString("kind"),
+            id = o.getString("id"),
+            projectId = o.optStringOrNull("project_id"),
+            title = o.optString("title"),
+            createdAt = o.optString("created_at"),
+            duration = o.optDouble("duration", 0.0),
+            size = o.optLong("size"),
+            path = o.optStringOrNull("path"),
+            ext = o.optStringOrNull("ext"),
+            status = o.optString("status"),
+            statusLabel = o.optString("status_label"),
+            busy = o.optBoolean("busy"),
+            broken = o.optBoolean("broken"),
+            segments = o.optInt("segments"),
+            hasSummary = o.optBoolean("has_summary"),
+            speakers = o.optInt("speakers"),
+        )
     }
 }
 
@@ -139,6 +196,14 @@ fun JSONArray?.objects(): List<JSONObject> =
 
 fun JSONArray?.strings(): List<String> =
     if (this == null) emptyList() else (0 until length()).map { optString(it) }
+
+/** 檔案大小：「14.5 MB」。 */
+fun formatSize(bytes: Long): String = when {
+    bytes >= 1L shl 30 -> "%.1f GB".format(bytes / (1L shl 30).toDouble())
+    bytes >= 1L shl 20 -> "%.1f MB".format(bytes / (1L shl 20).toDouble())
+    bytes >= 1L shl 10 -> "%.0f KB".format(bytes / (1L shl 10).toDouble())
+    else -> "$bytes B"
+}
 
 fun formatClock(secs: Double): String {
     val s = secs.toLong().coerceAtLeast(0)

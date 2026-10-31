@@ -100,7 +100,8 @@ pub struct Settings {
 
 /// 2：匯出預設改成「每場會議一個子資料夾」（2026-10-31 使用者：「會議預設開啟每場會議子資料夾」），
 /// 舊設定檔（存的是當時的預設 false）載入時改開一次，之後使用者自己關掉就尊重。
-pub const SETTINGS_SCHEMA: u32 = 2;
+/// 3：新增 PDF 格式且預設勾（2026-10-31 使用者：「輸出檔案也加入PDF並預設勾選」），舊設定檔補勾一次。
+pub const SETTINGS_SCHEMA: u32 = 3;
 
 impl Default for Settings {
     fn default() -> Self {
@@ -192,6 +193,9 @@ impl Settings {
         }
         if self.schema < 2 {
             self.export.subfolder = true;
+        }
+        if self.schema < 3 && !self.export.formats.iter().any(|f| f == "pdf") {
+            self.export.formats.push("pdf".into());
         }
         self.schema = SETTINGS_SCHEMA;
         true
@@ -293,6 +297,21 @@ mod tests {
         let s = Settings { export: crate::export::ExportOptions { subfolder: false, ..s.export }, ..s };
         s.save(&paths).unwrap();
         assert!(!Settings::load(&paths).export.subfolder);
+    }
+
+    #[test]
+    fn old_settings_tick_pdf_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = AppPaths::at(dir.path().to_path_buf());
+        paths.ensure().unwrap();
+        assert!(Settings::default().export.formats.iter().any(|f| f == "pdf"), "新安裝預設勾 PDF");
+        std::fs::write(paths.settings_file(), r#"{"schema": 2, "export": {"formats": ["docx", "md"]}}"#).unwrap();
+        let s = Settings::load(&paths);
+        assert_eq!(s.export.formats, ["docx", "md", "pdf"]);
+        // 之後使用者自己取消勾選：不再補回來
+        let s = Settings { export: crate::export::ExportOptions { formats: vec!["docx".into()], ..s.export }, ..s };
+        s.save(&paths).unwrap();
+        assert_eq!(Settings::load(&paths).export.formats, ["docx"]);
     }
 
     #[test]

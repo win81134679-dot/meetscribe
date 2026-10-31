@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.Intent
 import androidx.core.content.ContextCompat
 import io.github.win81134679.meetscribe.service.JobService
+import io.github.win81134679.meetscribe.service.Recording
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -41,6 +42,8 @@ object Repo {
     /** kind（openrouter／google）→ 遮罩後的金鑰；沒設定是 null。 */
     val keys = MutableStateFlow<Map<String, String?>>(emptyMap())
     val projects = MutableStateFlow<List<ProjectSummary>>(emptyList())
+    /** 錄音管理頁：App 錄的音檔＋每場會議的錄音。 */
+    val recordings = MutableStateFlow<List<RecordingItem>>(emptyList())
     val busy = MutableStateFlow<Set<String>>(emptySet())
     val progress = MutableStateFlow<Map<String, Progress>>(emptyMap())
     val logs = MutableStateFlow<Map<String, List<LogLine>>>(emptyMap())
@@ -59,6 +62,8 @@ object Repo {
     var filenamePresets: List<String> = emptyList(); private set
     var exportsDir: File = File("."); private set
     var importsDir: File = File("."); private set
+    /** 錄音機把檔寫在這裡（`<uuid>/<名稱>.m4a`），永久保存。 */
+    var recordingsDir: File = File("."); private set
     var version: String = ""; private set
     /** App 的版本（versionName；Rust 的版本號跟它一樣，但測試版可以只改 APK 的）。 */
     var appVersion: String = ""; private set
@@ -79,6 +84,7 @@ object Repo {
         runCatching { loadState(callSync("state") as JSONObject) }.onFailure { initError = it.message }
         scope.launch { pollLoop() }
         scope.launch { startUpdates() }
+        refreshRecordingsLater()
     }
 
     // ---------- 更新 ----------
@@ -148,6 +154,7 @@ object Repo {
         filenamePresets = st.optJSONArray("filename_presets").strings()
         exportsDir = File(st.optString("exports_dir"))
         importsDir = File(st.optString("imports_dir"))
+        recordingsDir = File(st.optString("recordings_dir"))
         version = st.optString("version")
     }
 
@@ -180,6 +187,36 @@ object Repo {
     suspend fun refreshProjects() {
         val list = (call("list_projects") as JSONArray).objects().map(ProjectSummary::from)
         projects.value = list
+    }
+
+    suspend fun refreshRecordings() {
+        recordings.value = (call("list_recordings") as JSONArray).objects().map(RecordingItem::from)
+    }
+
+    fun refreshRecordingsLater() {
+        scope.launch { runCatching { refreshRecordings() } }
+    }
+
+    /**
+     * 錄音機停止後：登記進錄音庫（讀長度、寫 info.json），之後一定在錄音管理找得到。
+     * 從「新增轉錄」開始錄的交給那頁當成選好的錄音；從錄音管理錄的只提示已儲存。
+     */
+    fun recordingStopped(file: File, title: String, transcribe: Boolean) {
+        scope.launch {
+            val r = try {
+                RecordingItem.from(call("add_recording", "path" to file.absolutePath, "title" to title) as JSONObject)
+            } catch (e: BridgeError) {
+                toasts.emit(true to "錄音存檔失敗：${e.message}")
+                null
+            }
+            runCatching { refreshRecordings() }
+            when {
+                r == null -> {}
+                r.broken -> toasts.emit(true to "錄音檔不完整，無法使用；可到「錄音管理」刪除")
+                transcribe -> Recording.finished.emit(r)
+                else -> toasts.emit(false to "已存到「錄音管理」：${r.title}")
+            }
+        }
     }
 
     suspend fun loadProject(id: String): ProjectDetail? =
@@ -246,6 +283,7 @@ object Repo {
                 replaceSummary(d.summary)
                 if (e.optString("type") == "finished") {
                     progress.update { it - d.id }
+                    refreshRecordingsLater()
                     Storage.scan(app, d.exported.map(::File))
                     // 排隊跑完的才通知（重新產生摘要也會送 finished，但那時人就在畫面上）
                     if (d.summary.status == "done" && d.id in busy.value) Notifier.projectDone(app, d.id, d.summary.title)
@@ -259,6 +297,7 @@ object Repo {
                 // 清單上的「排隊中／處理中」跟著變
                 projects.update { list -> list.map { it.copy(busy = it.id in ids) } }
                 if (ids.isNotEmpty()) startService()
+                refreshRecordingsLater()
             }
             "key_test" -> keyTests.update { it + (e.getString("kind") to KeyTest(e.optBoolean("ok"), e.optString("text"))) }
             "models" -> models.update {

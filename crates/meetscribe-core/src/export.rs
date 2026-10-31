@@ -16,10 +16,14 @@ pub trait Exporter: Send + Sync {
     fn has_summary(&self) -> bool {
         false
     }
+    /// 只放摘要（Word、PDF；2026-10-31 使用者：「docx更新成不放逐字稿」）：[`Content`] 對它沒作用，沒有摘要就不產這個檔。
+    fn summary_only(&self) -> bool {
+        false
+    }
     fn render(&self, project: &Project, opts: &ExportOptions) -> Result<Vec<u8>>;
 }
 
-/// 摘要與逐字稿怎麼放（只影響 Word、Markdown、純文字；字幕、CSV、JSON 固定是逐字稿／完整資料）。
+/// 摘要與逐字稿怎麼放（只影響 Markdown、純文字；Word、PDF 固定只放摘要，字幕、CSV、JSON 固定是逐字稿／完整資料）。
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub enum Content {
     /// 一個檔：摘要在前、逐字稿在後。
@@ -78,13 +82,16 @@ pub struct ExportOptions {
     pub merge_turns: bool,
     /// 開頭附檔案資訊（原始檔、長度、模型）與發言者統計表。
     pub header: bool,
+    /// 會議資料夾也放一份錄音（`<檔名>.m4a` 等；2026-10-31 使用者）。只有 Android 用：電腦版的錄音本來就在電腦上。
+    pub audio: bool,
 }
 
 impl Default for ExportOptions {
     fn default() -> Self {
         Self {
             auto: true,
-            formats: vec!["docx".into(), "md".into(), "srt".into()],
+            // PDF 預設勾（2026-10-31 使用者：「輸出檔案也加入PDF並預設勾選」）
+            formats: vec!["docx".into(), "pdf".into(), "md".into(), "srt".into()],
             dir: String::new(),
             subfolder: true,
             filename: FILENAME_PRESETS[0].into(),
@@ -94,6 +101,7 @@ impl Default for ExportOptions {
             speaker_names: true,
             merge_turns: true,
             header: true,
+            audio: true,
         }
     }
 }
@@ -140,6 +148,7 @@ pub fn registry() -> Vec<Box<dyn Exporter>> {
     vec![
         Box::new(MarkdownExporter),
         Box::new(DocxExporter),
+        Box::new(PdfExporter),
         Box::new(TextExporter),
         Box::new(SrtExporter),
         Box::new(VttExporter),
@@ -154,11 +163,16 @@ pub fn export_project(project: &Project, opts: &ExportOptions) -> Result<Vec<Pat
     if ids.is_empty() {
         return Err(Error::Other("沒有選任何匯出格式".into()));
     }
-    if opts.content == Content::SummaryOnly
-        && project.summary.is_none()
-        && registry().iter().all(|e| !ids.contains(&e.id()) || e.has_summary())
-    {
-        return Err(Error::Other("這場會議還沒有摘要，「只要摘要」沒有東西可匯出".into()));
+    if project.summary.is_none() {
+        // 沒有摘要時，只放摘要的格式（Word、PDF，以及「只要摘要」下的 Markdown、純文字）都不會產檔
+        let empty = |e: &dyn Exporter| e.summary_only() || (e.has_summary() && opts.content == Content::SummaryOnly);
+        if registry().iter().filter(|e| ids.contains(&e.id())).all(|e| empty(e.as_ref())) {
+            return Err(Error::Other(if opts.content == Content::SummaryOnly {
+                "這場會議還沒有摘要，「只要摘要」沒有東西可匯出".into()
+            } else {
+                "這場會議還沒有摘要；Word、PDF 只放摘要，請另外勾選 Markdown 或字幕檔".into()
+            }));
+        }
     }
     let dir = opts.target_dir(project);
     std::fs::create_dir_all(&dir)?;
@@ -167,6 +181,8 @@ pub fn export_project(project: &Project, opts: &ExportOptions) -> Result<Vec<Pat
     for ex in registry().into_iter().filter(|e| ids.contains(&e.id())) {
         // (檔名後綴, 這個檔的內容選項)
         let parts: Vec<(&str, Content)> = match (ex.has_summary(), opts.content) {
+            _ if ex.summary_only() && project.summary.is_none() => continue,
+            _ if ex.summary_only() => vec![("", Content::SummaryOnly)],
             (true, Content::Separate) if project.summary.is_some() => {
                 vec![(" 摘要", Content::SummaryOnly), (" 逐字稿", Content::TranscriptOnly)]
             }
@@ -523,37 +539,162 @@ impl Exporter for DocxExporter {
         "docx"
     }
     fn label(&self) -> &'static str {
-        "Word 文件"
+        "Word 摘要"
     }
     fn extension(&self) -> &'static str {
         "docx"
     }
-    fn has_summary(&self) -> bool {
+    fn summary_only(&self) -> bool {
         true
     }
     fn render(&self, p: &Project, o: &ExportOptions) -> Result<Vec<u8>> {
-        docx::render(p, o)
+        docx::render(p, &summary_only(o))
     }
 }
 
+/// PDF：跟 Word 同一份內容與版面（見 [`pdf`]）。
+pub struct PdfExporter;
+impl Exporter for PdfExporter {
+    fn id(&self) -> &'static str {
+        "pdf"
+    }
+    fn label(&self) -> &'static str {
+        "PDF 摘要"
+    }
+    fn extension(&self) -> &'static str {
+        "pdf"
+    }
+    fn summary_only(&self) -> bool {
+        true
+    }
+    fn render(&self, p: &Project, o: &ExportOptions) -> Result<Vec<u8>> {
+        pdf::render(p, &summary_only(o))
+    }
+}
+
+fn summary_only(o: &ExportOptions) -> ExportOptions {
+    ExportOptions {
+        content: Content::SummaryOnly,
+        ..o.clone()
+    }
+}
+
+/// 摘要 Markdown 的一個區塊（Word 與 PDF 共用同一份解析，兩邊版面才會一樣）。
+enum MdBlock<'a> {
+    /// 表格的每一列（分隔列已去掉），第一列是表頭。
+    Table(Vec<Vec<String>>),
+    Heading(usize, &'a str),
+    /// 條列：符號（•、☐、☑、「1.」）、縮排層級、內容。
+    Item(String, usize, &'a str),
+    Quote(&'a str),
+    Para(&'a str),
+}
+
+/// 摘要第一行常是跟文件標題一樣的 `# 標題`，重複的略過；空行與分隔線略過。
+fn md_blocks<'a>(md: &'a str, title: &str) -> Vec<MdBlock<'a>> {
+    let lines: Vec<&str> = md.lines().collect();
+    let mut out = Vec::new();
+    let mut i = 0;
+    let mut first_heading = true;
+    while i < lines.len() {
+        let line = lines[i].trim_end();
+        let trimmed = line.trim_start();
+        if trimmed.starts_with('|') {
+            let mut rows: Vec<Vec<String>> = Vec::new();
+            while i < lines.len() && lines[i].trim_start().starts_with('|') {
+                let cells: Vec<String> = lines[i]
+                    .trim()
+                    .trim_matches('|')
+                    .split('|')
+                    .map(|c| c.trim().to_string())
+                    .collect();
+                let is_sep = cells
+                    .iter()
+                    .all(|c| !c.is_empty() && c.chars().all(|ch| matches!(ch, '-' | ':' | ' ')));
+                if !is_sep {
+                    rows.push(cells);
+                }
+                i += 1;
+            }
+            if rows.iter().any(|r| !r.is_empty()) {
+                out.push(MdBlock::Table(rows));
+            }
+            continue;
+        }
+        if let Some(level) = heading_level(trimmed) {
+            let text = trimmed.trim_start_matches('#').trim();
+            let duplicate = first_heading && level == 1 && text.replace("**", "") == title;
+            first_heading = false;
+            if !duplicate {
+                out.push(MdBlock::Heading(level, text));
+            }
+        } else if let Some((marker, rest)) = list_item(trimmed) {
+            out.push(MdBlock::Item(marker, (line.len() - trimmed.len()) / 2, rest));
+        } else if let Some(q) = trimmed.strip_prefix('>') {
+            out.push(MdBlock::Quote(q.trim()));
+        } else if !(trimmed.is_empty() || trimmed.chars().all(|c| matches!(c, '-' | '*' | '_'))) {
+            out.push(MdBlock::Para(trimmed));
+        }
+        i += 1;
+    }
+    out
+}
+
+fn heading_level(s: &str) -> Option<usize> {
+    let n = s.chars().take_while(|c| *c == '#').count();
+    (n > 0 && s.chars().nth(n) == Some(' ')).then_some(n)
+}
+
+/// 條列：(符號, 內容)。待辦用方框、編號保留原編號、其他用圓點。
+fn list_item(s: &str) -> Option<(String, &str)> {
+    for (p, m) in [("- [ ] ", "☐"), ("- [x] ", "☑"), ("- [X] ", "☑"), ("* [ ] ", "☐"), ("* [x] ", "☑")] {
+        if let Some(r) = s.strip_prefix(p) {
+            return Some((m.to_string(), r));
+        }
+    }
+    for p in ["- ", "* ", "+ "] {
+        if let Some(r) = s.strip_prefix(p) {
+            return Some(("•".to_string(), r));
+        }
+    }
+    let digits = s.chars().take_while(char::is_ascii_digit).count();
+    if digits > 0
+        && let Some(r) = s[digits..].strip_prefix(". ")
+    {
+        return Some((format!("{}.", &s[..digits]), r));
+    }
+    None
+}
+
+/// `**粗體**` 切成 (文字, 是否粗體)，反引號拿掉。
+fn inline_parts(text: &str) -> Vec<(String, bool)> {
+    text.split("**")
+        .enumerate()
+        .filter(|(_, part)| !part.is_empty())
+        .map(|(i, part)| (part.replace('`', ""), i % 2 == 1))
+        .collect()
+}
+
+mod pdf;
+
 /// Word 會議紀錄（2026-10-31 使用者：「docx也要修 我希望把排版...等變得更好」）。
 /// A4、頁首會議名稱、頁尾頁碼；標題區＋會議資訊表；章節標題主色加底線；摘要的條列、待辦方框、編號、引言、表格各有樣式；
-/// 發言者表附顏色與佔比；逐字稿另起一頁，每段「說話者（顏色）＋時間」一行、內文縮排。
+/// 發言者表附顏色與佔比。2026-10-31 起只放摘要（「docx更新成不放逐字稿」），逐字稿在 Markdown、字幕檔；PDF 照這份版面畫（[`pdf`]）。
 mod docx {
     use super::*;
     use docx_rs::*;
 
-    const FONT_EA: &str = "微軟正黑體";
+    pub(super) const FONT_EA: &str = "微軟正黑體";
     const FONT_LATIN: &str = "Calibri";
     /// 主色（同程式介面的薰衣草紫）與深一階的標題色。
-    const ACCENT: &str = "7F77DD";
-    const ACCENT_DARK: &str = "4B4594";
-    const ACCENT_TINT: &str = "EEECFB";
-    const TEXT: &str = "1F2430";
-    const MUTED: &str = "6B7280";
-    const RULE: &str = "E3E1EE";
+    pub(super) const ACCENT: &str = "7F77DD";
+    pub(super) const ACCENT_DARK: &str = "4B4594";
+    pub(super) const ACCENT_TINT: &str = "EEECFB";
+    pub(super) const TEXT: &str = "1F2430";
+    pub(super) const MUTED: &str = "6B7280";
+    pub(super) const RULE: &str = "E3E1EE";
     /// 說話者顏色（印出來也看得清楚的深色版，順序同介面）。
-    const SPEAKER_COLORS: [&str; 10] = [
+    pub(super) const SPEAKER_COLORS: [&str; 10] = [
         "5B54C4", "0E7C66", "C2410C", "B4237A", "1D63C9", "7C3AED", "3F7D1F", "A16207", "0F766E", "BE123C",
     ];
     /// A4，單位 twip（1/1440 英吋）。
@@ -707,76 +848,19 @@ mod docx {
             doc = doc.add_table(info_table(p));
         }
 
-        if o.content.summary()
-            && let Some(sum) = &p.summary
-        {
+        if let Some(sum) = &p.summary {
             doc = doc.add_paragraph(heading("會議摘要"));
             doc = markdown_into(doc, &sum.markdown, &p.title);
-        }
-        if !o.content.transcript() {
-            return pack(doc);
         }
         if o.header && !p.speakers.is_empty() {
             doc = doc.add_paragraph(heading("發言者"));
             doc = doc.add_table(speaker_table(p));
-        }
-        // 有摘要時逐字稿另起一頁，印出來好分開
-        let mut h = heading("逐字稿");
-        if o.content.summary() && p.summary.is_some() {
-            h = h.page_break_before(true);
-        }
-        doc = doc.add_paragraph(h);
-        for (start, name, text, speaker) in turns_with_speaker(p, o) {
-            let has_meta = !name.is_empty() || o.timestamps;
-            if has_meta {
-                let mut meta = Paragraph::new().keep_next(true).line_spacing(spacing(160, 20));
-                if !name.is_empty() {
-                    let color = speaker_color(p, speaker.as_deref());
-                    meta = meta
-                        .add_run(dot(color, 21))
-                        .add_run(Run::new().add_text(&name).bold().size(21).color(color));
-                }
-                if o.timestamps {
-                    let gap = if name.is_empty() { "" } else { "　" };
-                    meta = meta.add_run(Run::new().add_text(format!("{gap}{}", fmt_hms(start))).size(17).color(MUTED));
-                }
-                doc = doc.add_paragraph(meta);
-            }
-            let body = Paragraph::new()
-                .indent(Some(if has_meta { 300 } else { 0 }), None, None, None)
-                .line_spacing(spacing(0, if has_meta { 60 } else { 120 }))
-                .add_run(Run::new().add_text(text).color(TEXT));
-            doc = doc.add_paragraph(body);
         }
         pack(doc)
     }
 
     fn heading(text: &str) -> Paragraph {
         Paragraph::new().style("Heading1").keep_next(true).add_run(Run::new().add_text(text))
-    }
-
-    /// 同 [`turns`]，多帶說話者 ID（決定顏色）。
-    fn turns_with_speaker(p: &Project, o: &ExportOptions) -> Vec<(f64, String, String, Option<String>)> {
-        let mut out: Vec<(f64, String, String, Option<String>)> = Vec::new();
-        for s in &p.segments {
-            if o.merge_turns
-                && let Some(t) = out.last_mut()
-                && t.3 == s.speaker
-            {
-                if crate::model::needs_space(&t.2, &s.text) {
-                    t.2.push(' ');
-                }
-                t.2.push_str(&s.text);
-                continue;
-            }
-            let name = if o.speaker_names && s.speaker.is_some() {
-                p.speaker_name(s.speaker.as_deref())
-            } else {
-                String::new()
-            };
-            out.push((s.start, name, s.text.clone(), s.speaker.clone()));
-        }
-        out
     }
 
     fn pack(doc: Docx) -> Result<Vec<u8>> {
@@ -880,35 +964,14 @@ mod docx {
         table(rows, w.to_vec())
     }
 
-    /// 摘要的 Markdown 轉 Word：標題、條列、待辦方框、編號、引言、表格、**粗體**。
-    /// 摘要第一行常是跟文件標題一樣的 `# 標題`，重複的略過。
+    /// 摘要的 Markdown 轉 Word：標題、條列、待辦方框、編號、引言、表格、**粗體**（區塊解析見 [`md_blocks`]）。
     fn markdown_into(mut doc: Docx, md: &str, title: &str) -> Docx {
-        let lines: Vec<&str> = md.lines().collect();
-        let mut i = 0;
-        let mut first_heading = true;
-        while i < lines.len() {
-            let line = lines[i].trim_end();
-            let trimmed = line.trim_start();
-            if trimmed.starts_with('|') {
-                let mut cells_rows: Vec<Vec<String>> = Vec::new();
-                while i < lines.len() && lines[i].trim_start().starts_with('|') {
-                    let cells: Vec<String> = lines[i]
-                        .trim()
-                        .trim_matches('|')
-                        .split('|')
-                        .map(|c| c.trim().to_string())
-                        .collect();
-                    let is_sep = cells
-                        .iter()
-                        .all(|c| !c.is_empty() && c.chars().all(|ch| matches!(ch, '-' | ':' | ' ')));
-                    if !is_sep {
-                        cells_rows.push(cells);
-                    }
-                    i += 1;
-                }
-                if let Some(cols) = cells_rows.iter().map(Vec::len).max().filter(|n| *n > 0) {
+        for block in md_blocks(md, title) {
+            match block {
+                MdBlock::Table(rows) => {
+                    let cols = rows.iter().map(Vec::len).max().unwrap_or(1).max(1);
                     let w = BODY_W / cols;
-                    let rows = cells_rows
+                    let rows = rows
                         .iter()
                         .enumerate()
                         .map(|(r, cells)| {
@@ -926,79 +989,43 @@ mod docx {
                     doc = doc.add_table(table(rows, vec![w; cols]));
                     doc = doc.add_paragraph(Paragraph::new().line_spacing(spacing(0, 60)));
                 }
-                continue;
-            }
-            if let Some(level) = heading_level(trimmed) {
-                let text = trimmed.trim_start_matches('#').trim();
-                let duplicate = first_heading && level == 1 && text.replace("**", "") == title;
-                first_heading = false;
-                if !duplicate {
+                MdBlock::Heading(level, text) => {
                     let style = format!("Heading{}", (level + 1).min(4));
                     doc = doc.add_paragraph(inline(Paragraph::new().style(&style).keep_next(true), text));
                 }
-            } else if let Some((marker, rest)) = list_item(trimmed) {
-                let depth = (line.len() - trimmed.len()) / 2;
-                let left = 360 * (depth as i32 + 1);
-                let para = Paragraph::new()
-                    .indent(Some(left), Some(SpecialIndentType::Hanging(300)), None, None)
-                    .line_spacing(spacing(0, 60));
-                let color = if marker == "•" { ACCENT } else { TEXT };
-                let para = para.add_run(Run::new().add_text(format!("{marker}\t")).color(color));
-                doc = doc.add_paragraph(inline(para, rest));
-            } else if let Some(q) = trimmed.strip_prefix('>') {
-                let mut para = Paragraph::new()
-                    .indent(Some(240), None, None, None)
-                    .line_spacing(spacing(80, 80));
-                para.property = para.property.set_borders(
-                    ParagraphBorders::with_empty().set(
-                        ParagraphBorder::new(ParagraphBorderPosition::Left).val(BorderType::Single).size(18).space(8).color(ACCENT),
-                    ),
-                );
-                doc = doc.add_paragraph(inline_colored(para, q.trim(), MUTED));
-            } else if trimmed.is_empty() || trimmed.chars().all(|c| matches!(c, '-' | '*' | '_')) {
-                // 空行與分隔線略過
-            } else {
-                doc = doc.add_paragraph(inline(Paragraph::new().line_spacing(spacing(0, 100)), trimmed));
+                MdBlock::Item(marker, depth, rest) => {
+                    let left = 360 * (depth as i32 + 1);
+                    let para = Paragraph::new()
+                        .indent(Some(left), Some(SpecialIndentType::Hanging(300)), None, None)
+                        .line_spacing(spacing(0, 60));
+                    let color = if marker == "•" { ACCENT } else { TEXT };
+                    let para = para.add_run(Run::new().add_text(format!("{marker}\t")).color(color));
+                    doc = doc.add_paragraph(inline(para, rest));
+                }
+                MdBlock::Quote(q) => {
+                    let mut para = Paragraph::new()
+                        .indent(Some(240), None, None, None)
+                        .line_spacing(spacing(80, 80));
+                    para.property = para.property.set_borders(
+                        ParagraphBorders::with_empty().set(
+                            ParagraphBorder::new(ParagraphBorderPosition::Left).val(BorderType::Single).size(18).space(8).color(ACCENT),
+                        ),
+                    );
+                    doc = doc.add_paragraph(inline_colored(para, q, MUTED));
+                }
+                MdBlock::Para(t) => doc = doc.add_paragraph(inline(Paragraph::new().line_spacing(spacing(0, 100)), t)),
             }
-            i += 1;
         }
         doc
     }
 
-    fn heading_level(s: &str) -> Option<usize> {
-        let n = s.chars().take_while(|c| *c == '#').count();
-        (n > 0 && s.chars().nth(n) == Some(' ')).then_some(n)
-    }
-
-    /// 條列：(符號, 內容)。待辦用方框、編號保留原編號、其他用圓點。
-    fn list_item(s: &str) -> Option<(String, &str)> {
-        for (p, m) in [("- [ ] ", "☐"), ("- [x] ", "☑"), ("- [X] ", "☑"), ("* [ ] ", "☐"), ("* [x] ", "☑")] {
-            if let Some(r) = s.strip_prefix(p) {
-                return Some((m.to_string(), r));
-            }
-        }
-        for p in ["- ", "* ", "+ "] {
-            if let Some(r) = s.strip_prefix(p) {
-                return Some(("•".to_string(), r));
-            }
-        }
-        let digits = s.chars().take_while(char::is_ascii_digit).count();
-        if digits > 0
-            && let Some(r) = s[digits..].strip_prefix(". ")
-        {
-            return Some((format!("{}.", &s[..digits]), r));
-        }
-        None
-    }
-
     /// `**粗體**` 切成粗體 run，其他 Markdown 記號拿掉。
     fn inline_runs(text: &str, all_bold: bool, color: &str, size: usize) -> Vec<Run> {
-        text.split("**")
-            .enumerate()
-            .filter(|(_, part)| !part.is_empty())
-            .map(|(i, part)| {
-                let mut run = Run::new().add_text(part.replace('`', "")).color(color).size(size);
-                if all_bold || i % 2 == 1 {
+        inline_parts(text)
+            .into_iter()
+            .map(|(part, bold)| {
+                let mut run = Run::new().add_text(part).color(color).size(size);
+                if all_bold || bold {
                     run = run.bold();
                 }
                 run
@@ -1137,9 +1164,10 @@ mod tests {
         }
     }
 
-    /// 2026-10-31「docx也要修 我希望把排版...等變得更好」：頁碼、待辦方框、編號、逐字稿另起一頁、標題不重複。
+    /// 2026-10-31「docx也要修 我希望把排版...等變得更好」：頁碼、待辦方框、編號、標題不重複；
+    /// 同日「docx更新成不放逐字稿」：內容選項設成摘要＋逐字稿也只放摘要。
     #[test]
-    fn docx_layout_has_page_numbers_checkboxes_and_transcript_page() {
+    fn docx_layout_has_page_numbers_checkboxes_and_no_transcript() {
         use std::io::Read;
         let mut p = project();
         p.title = "重點".into();
@@ -1158,8 +1186,9 @@ mod tests {
         let doc = read("word/document.xml");
         assert!(doc.contains("☐") && doc.contains("☑"), "待辦用方框");
         assert!(doc.contains(">1.<") || doc.contains(">1.	<") || doc.contains("1.	"), "編號保留");
-        assert!(doc.contains("pageBreakBefore"), "有摘要時逐字稿另起一頁");
-        assert_eq!(doc.matches(">重點<").count(), 1, "摘要第一行跟標題一樣的略過，內文只有標題區那一次（頁首在 header.xml）");
+        assert!(!doc.contains("開始。") && !doc.contains("逐字稿<"), "Word 不放逐字稿");
+        assert!(doc.contains(">發言者<"), "發言者統計留著");
+        assert_eq!(doc.matches(">重點 摘要<").count(), 1, "標題區是「標題 摘要」，摘要第一行跟會議名稱一樣的 # 標題略過");
         assert!(doc.contains("w:w=\"") && doc.contains("w:type=\"dxa\""), "表格固定寬度");
         let footer: String = (1..=3)
             .filter_map(|i| zip.by_name(&format!("word/footer{i}.xml")).ok().map(|mut f| {
@@ -1169,6 +1198,64 @@ mod tests {
             }))
             .collect();
         assert!(footer.contains("PAGE") && footer.contains("NUMPAGES"), "頁尾有頁碼");
+    }
+
+    /// 「輸出檔案也加入PDF並預設勾選」：預設格式含 PDF；Word、PDF 沒有摘要就不產，只選它們時要報錯。
+    #[test]
+    fn default_formats_include_pdf_and_summary_only_formats_skip_without_summary() {
+        if !pdf::font_available() {
+            eprintln!("這台沒有中文字型，略過");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let mut p = project();
+        assert_eq!(export_into(dir.path(), &p, opts()).unwrap(), ["週會.md", "週會.docx", "週會.pdf", "週會.srt"]);
+        p.summary = None;
+        let names = export_into(dir.path(), &p, opts()).unwrap();
+        assert_eq!(names, ["週會 (2).md", "週會 (2).srt"], "沒摘要：Word、PDF 不產");
+        let only = ExportOptions { formats: vec!["docx".into(), "pdf".into()], ..opts() };
+        let e = export_into(dir.path(), &p, only).unwrap_err().to_string();
+        assert!(e.contains("Word、PDF 只放摘要"), "{e}");
+    }
+
+    #[test]
+    fn pdf_has_pages_fonts_and_no_transcript() {
+        if !pdf::font_available() {
+            eprintln!("這台沒有中文字型，略過");
+            return;
+        }
+        let mut p = project();
+        p.summary.as_mut().unwrap().markdown =
+            format!("# 重點
+- [ ] 寄企劃書
+- [x] 定好檢討會
+1. 先報價
+> 備註
+
+{}", "很長的段落，".repeat(400));
+        let bytes = PdfExporter.render(&p, &opts()).unwrap();
+        assert!(bytes.starts_with(b"%PDF-"));
+        assert!(bytes.len() < 2_000_000, "字型有子集化（不是整個 20 MB 嵌進去）：{}", bytes.len());
+        // 留一份給人看（target/pdf-shots/，同 UI 截圖）；頁數、文字由 tests 外用 PyMuPDF 驗
+        let out = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/pdf-shots");
+        std::fs::create_dir_all(&out).unwrap();
+        std::fs::write(out.join("摘要.pdf"), &bytes).unwrap();
+        let mut docx = std::io::Cursor::new(Vec::new());
+        std::io::Write::write_all(&mut docx, &DocxExporter.render(&p, &opts()).unwrap()).unwrap();
+        std::fs::write(out.join("摘要.docx"), docx.into_inner()).unwrap();
+    }
+
+    #[test]
+    fn pdf_line_breaking_keeps_words_and_punctuation() {
+        if !pdf::font_available() {
+            return;
+        }
+        // 11 pt 的中文字約 11 pt 寬：50 pt 放得下 4 個字
+        let lines = pdf::line_breaks("一二三四，五六七", 50.0);
+        assert!(lines.iter().all(|l| !l.starts_with('，')), "句讀不放行首：{lines:?}");
+        let lines = pdf::line_breaks("請看 OpenRouter 的帳單", 70.0);
+        assert!(lines.iter().any(|l| l.contains("OpenRouter")), "英文字不拆開：{lines:?}");
+        assert_eq!(lines.concat().replace(' ', ""), "請看OpenRouter的帳單");
     }
 
     #[test]

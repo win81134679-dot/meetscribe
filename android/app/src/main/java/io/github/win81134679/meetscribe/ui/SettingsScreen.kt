@@ -195,12 +195,13 @@ private fun ExportDefaults(settings: JSONObject, onChange: (JSONObject) -> Unit)
                 Text("${e.label}（.${e.extension}）")
             }
         }
-        SelectRow("內容", Repo.contents.map { it.id to it.label }, ex.optString("content", "Both")) { v -> put { put("content", v) } }
+        SelectRow("Markdown／純文字內容", Repo.contents.map { it.id to it.label }, ex.optString("content", "Both")) { v -> put { put("content", v) } }
         SelectRow("檔名", Repo.filenamePresets.map { it to it }, ex.optString("filename", "{標題}")) { v -> put { put("filename", v) } }
         SwitchRow("每場會議一個子資料夾", ex.optBoolean("subfolder", true), "資料夾名稱同檔名，一場會議的檔案放在一起") { v -> put { put("subfolder", v) } }
         SwitchRow("時間戳記", ex.optBoolean("timestamps", true)) { v -> put { put("timestamps", v) } }
         SwitchRow("標出說話者", ex.optBoolean("speaker_names", true)) { v -> put { put("speaker_names", v) } }
         SwitchRow("同一人連續發言併成一段", ex.optBoolean("merge_turns", true)) { v -> put { put("merge_turns", v) } }
         SwitchRow("開頭附檔案資訊與發言統計", ex.optBoolean("header", true)) { v -> put { put("header", v) } }
+        SwitchRow("會議資料夾附上錄音檔", ex.optBoolean("audio", true), "跟 Word、字幕放一起，「檔案」App 和接電腦都看得到") { v -> put { put("audio", v) } }
     }
 }

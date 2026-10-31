@@ -5,6 +5,7 @@
 //! - [`Bridge::poll`]：取走累積的事件（最多等 `timeout`），回 JSON 陣列。
 //!
 //! 跟桌面的 `worker.rs` 一樣一次只跑一個專案；專案資料從磁碟讀，跑的途中每次存檔都會發 `updated` 事件。
+//! 錄音管理頁的資料（App 內錄的音檔＋每場會議的錄音）見 [`crate::recordings`] 與 `list_recordings`。
 
 use meetscribe_core::audio::AudioTool;
 use meetscribe_core::config::{AppPaths, Settings};
@@ -16,9 +17,10 @@ use meetscribe_core::pipeline::{Engine, Event, EventSink, LogLevel};
 use meetscribe_core::secrets::{self, ApiKeys, KeyKind};
 use meetscribe_core::store::ProjectStore;
 use meetscribe_core::update::{self, Outcome, Platform, UpdateState};
+use crate::recordings::{Library, Recording};
 use serde_json::{Value, json};
 use std::collections::{HashMap, VecDeque};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 use tokio::sync::mpsc as tmpsc;
@@ -38,6 +40,8 @@ struct Shared {
     exports_dir: PathBuf,
     /// Kotlin 匯入的錄音副本放這裡；處理完成後刪掉。
     imports_dir: PathBuf,
+    /// App 內錄的音檔（永久保存，見 [`crate::recordings`]）。
+    library: Library,
     settings: Mutex<Settings>,
     events: Mutex<VecDeque<Value>>,
     ready: Condvar,
@@ -67,7 +71,8 @@ impl Bridge {
         paths.ensure().map_err(|e| e.to_string())?;
         secrets::use_file_store(data_dir.join("keys.json"));
         let imports_dir = data_dir.join("imports");
-        for d in [&exports_dir, &imports_dir] {
+        let recordings_dir = data_dir.join("recordings");
+        for d in [&exports_dir, &imports_dir, &recordings_dir] {
             std::fs::create_dir_all(d).map_err(|e| format!("無法建立 {}：{e}", d.display()))?;
         }
         let mut settings = Settings::load(&paths);
@@ -87,6 +92,7 @@ impl Bridge {
             paths,
             exports_dir,
             imports_dir,
+            library: Library::new(recordings_dir),
             settings: Mutex::new(settings),
             events: Mutex::default(),
             ready: Condvar::new(),
@@ -105,6 +111,10 @@ impl Bridge {
             }
         }
         shared.clean_imports(&projects);
+        // 錄到一半 App 被關掉的錄音補登記（錄音機跟核心在同一個行程，這時一定沒有在錄）
+        if let Ok(audio) = AudioTool::locate("") {
+            shared.library.recover(|f| rt.block_on(audio.probe_duration(f)).ok().filter(|d| *d > 0.0));
+        }
         rt.spawn(upgrade_projects(shared.clone()));
         Ok(Self { rt, shared })
     }
@@ -146,6 +156,7 @@ impl Bridge {
                 "filename_presets": export::FILENAME_PRESETS,
                 "exports_dir": s.exports_dir,
                 "imports_dir": s.imports_dir,
+                "recordings_dir": s.library.root(),
                 "version": env!("CARGO_PKG_VERSION"),
                 "device_id": update::device_id(&s.paths.root),
             })),
@@ -207,6 +218,48 @@ impl Bridge {
                 Ok(Value::Array(list.iter().map(|p| s.summary_view(p)).collect()))
             }
             "load_project" => Ok(s.full_view(&s.load(req)?)),
+            // ---------- 錄音管理 ----------
+            // 錄音機停止後登記（讀長度、寫 info.json）；讀不出長度的標成不完整
+            "add_recording" => {
+                let path = PathBuf::from(str_field(req, "path")?);
+                let audio = AudioTool::locate("").map_err(|e| e.to_string())?;
+                let d = self.rt.block_on(audio.probe_duration(&path)).ok().filter(|d| *d > 0.0);
+                let r = s.library.add(&path, req["title"].as_str().unwrap_or(""), d)?;
+                Ok(s.recording_view(&r, &s.store().list()))
+            }
+            "list_recordings" => Ok(Value::Array(s.recordings())),
+            "rename_recording" => {
+                let r = s.library.rename(uuid(req)?, str_field(req, "title")?)?;
+                Ok(s.recording_view(&r, &s.store().list()))
+            }
+            "delete_recording" => {
+                let id = uuid(req)?;
+                if let Some(p) = s.library.get(id).and_then(|r| s.store().list().into_iter().find(|p| p.source_file == r.path)) {
+                    return Err(format!("這段錄音正用在會議「{}」，請到那場會議處理", p.title));
+                }
+                s.library.delete(id)?;
+                Ok(Value::Null)
+            }
+            // 存一份到手機的公開資料夾：錄音庫的放「文件/語音轉錄/錄音」，會議的放進會議資料夾（跟 Word、字幕放一起）
+            "save_recording" => {
+                let id = uuid(req)?;
+                let path = if req["kind"] == "meeting" {
+                    let mut p = s.store().load(id).map_err(|e| e.to_string())?;
+                    let mut opts = p.options.export.clone().unwrap_or_else(|| s.settings().export);
+                    s.fix_export_dir(&mut opts);
+                    let f = s.export_audio(&p, &opts)?.ok_or("這場會議沒有錄音檔")?;
+                    if !s.is_busy(p.id) && !p.exported.contains(&f) {
+                        p.exported.push(f.clone());
+                        let _ = s.store().save(&p);
+                    }
+                    f
+                } else {
+                    let r = s.library.get(id).ok_or("找不到這段錄音")?;
+                    let dir = s.exports_dir.join("錄音");
+                    copy_audio(&r.path, &dir, &meetscribe_core::textutil::safe_filename(&r.info.title), false)?
+                };
+                Ok(json!(path))
+            }
             "save_settings" => {
                 let new: Settings = serde_json::from_value(req["settings"].clone())
                     .map_err(|e| format!("設定格式錯誤：{e}"))?;
@@ -290,7 +343,13 @@ impl Bridge {
                     None => p.options.export.clone().unwrap_or_else(|| s.settings().export),
                 };
                 s.fix_export_dir(&mut opts);
-                let files = export::export_project(&p, &opts).map_err(|e| e.to_string())?;
+                let mut files = export::export_project(&p, &opts).map_err(|e| e.to_string())?;
+                // 會議資料夾附一份錄音（2026-10-31 使用者：「匯出時一併存一份錄音」）
+                if opts.audio
+                    && let Ok(Some(f)) = s.export_audio(&p, &opts)
+                {
+                    files.push(f);
+                }
                 // 記在專案上：刪除會議時才知道有哪些檔要一起刪（處理中的專案由背景工作存檔，不在這裡改）
                 if !s.is_busy(p.id) {
                     let mut p = p;
@@ -573,13 +632,15 @@ impl Shared {
             let mut opts = p.options.export.clone().unwrap_or_else(|| self.settings().export);
             self.fix_export_dir(&mut opts);
             let stem = opts.file_stem(p);
-            let exts: Vec<&str> = export::registry().iter().map(|e| e.extension()).collect();
+            let mut exts: Vec<String> = export::registry().iter().map(|e| e.extension().to_string()).collect();
+            // 會議資料夾裡的那份錄音
+            exts.extend(self.audio_of(p).and_then(|f| audio_ext(&f)));
             if let Ok(rd) = std::fs::read_dir(&dir) {
                 for e in rd.flatten() {
                     let f = e.path();
                     let name = f.file_name().and_then(|n| n.to_str()).unwrap_or_default().to_string();
                     let ext = f.extension().and_then(|x| x.to_str()).unwrap_or_default().to_ascii_lowercase();
-                    if f.is_file() && name.starts_with(&stem) && exts.contains(&ext.as_str()) && !out.contains(&f) {
+                    if f.is_file() && name.starts_with(&stem) && exts.contains(&ext) && !out.contains(&f) {
                         out.push(f);
                     }
                 }
@@ -597,6 +658,102 @@ impl Shared {
         Some(opts.target_dir(p))
             .filter(|d| d.is_dir())
             .or_else(|| p.exported.iter().find_map(|f| f.parent().filter(|d| d.is_dir()).map(PathBuf::from)))
+    }
+
+    /// 這場會議的錄音：播放用的高品質副本（Android 就是原始錄音），還沒做出來（處理中）就用原始檔。
+    fn audio_of(&self, p: &Project) -> Option<PathBuf> {
+        p.playback_file
+            .as_deref()
+            .map(|f| self.store().path_in(p.id, f))
+            .filter(|f| f.is_file())
+            .or_else(|| Some(p.source_file.clone()).filter(|f| f.is_file()))
+            .or_else(|| p.audio_file.as_deref().map(|f| self.store().path_in(p.id, f)).filter(|f| f.is_file()))
+    }
+
+    /// 會議資料夾放一份錄音：`<檔名>.<副檔名>`（Android 的播放檔就是原始錄音，不重壓）。已有一樣大小的同名檔就不再寫。
+    fn export_audio(&self, p: &Project, opts: &ExportOptions) -> Res<Option<PathBuf>> {
+        let Some(src) = self.audio_of(p) else { return Ok(None) };
+        copy_audio(&src, &opts.target_dir(p), &opts.file_stem(p), opts.overwrite).map(Some)
+    }
+
+    /// 錄音管理頁的清單：錄音庫裡還沒建會議的錄音＋每場會議（新的在前）。
+    /// 已建會議（轉錄中、失敗）的錄音不另外列，由那場會議代表，同一段錄音才不會出現兩次。
+    fn recordings(&self) -> Vec<Value> {
+        let projects = self.store().list();
+        let mut items: Vec<(chrono::DateTime<chrono::Local>, Value)> = self
+            .library
+            .list()
+            .iter()
+            .filter(|r| !projects.iter().any(|p| p.source_file == r.path))
+            .map(|r| (r.info.created_at, self.recording_view(r, &projects)))
+            .collect();
+        items.extend(projects.iter().map(|p| (p.created_at, self.meeting_recording_view(p))));
+        items.sort_by_key(|(t, _)| std::cmp::Reverse(*t));
+        items.into_iter().map(|(_, v)| v).collect()
+    }
+
+    fn recording_view(&self, r: &Recording, projects: &[Project]) -> Value {
+        let project = projects.iter().find(|p| p.source_file == r.path);
+        json!({
+            "kind": "recording",
+            "id": r.id,
+            "project_id": project.map(|p| p.id),
+            "title": r.info.title,
+            "created_at": r.info.created_at.format("%Y-%m-%d %H:%M").to_string(),
+            "duration": r.info.duration,
+            "size": r.size(),
+            "path": r.path,
+            "ext": audio_ext(&r.path),
+            "status": "untranscribed",
+            "status_label": "未轉錄",
+            "busy": false,
+            "broken": r.info.broken,
+        })
+    }
+
+    fn meeting_recording_view(&self, p: &Project) -> Value {
+        let summary = self.summary_view(p);
+        let audio = self.audio_of(p);
+        json!({
+            "kind": "meeting",
+            "id": p.id,
+            "project_id": p.id,
+            "title": p.title,
+            "created_at": summary["created_at"],
+            "duration": p.duration,
+            "size": audio.as_ref().and_then(|f| std::fs::metadata(f).ok()).map(|m| m.len()).unwrap_or(0),
+            "path": audio,
+            "ext": audio.as_deref().and_then(audio_ext),
+            "status": summary["status"],
+            "status_label": if summary["status"] == "done" { json!("已轉錄") } else { summary["status_label"].clone() },
+            "busy": summary["busy"],
+            "broken": false,
+            "segments": p.segments.len(),
+            "has_summary": p.summary.is_some(),
+            "speakers": p.speakers.len(),
+        })
+    }
+
+    /// 處理完成：錄音庫的那段錄音併進會議（專案資料夾已有播放用副本才刪，免得只剩 16 kHz 的版本）；
+    /// 開著自動匯出的話，會議資料夾也放一份錄音。
+    fn after_done(&self, p: &mut Project) {
+        if let Some(id) = self.library.id_of(&p.source_file)
+            && p.playback_file.as_deref().is_some_and(|f| self.store().path_in(p.id, f).is_file())
+        {
+            let _ = self.library.delete(id);
+        }
+        let mut opts = p.options.export.clone().unwrap_or_else(|| self.settings().export);
+        self.fix_export_dir(&mut opts);
+        // 自動匯出有產出檔案才附錄音（沒開自動匯出、或全部格式都沒產出時不動）
+        if opts.auto
+            && opts.audio
+            && !p.exported.is_empty()
+            && let Ok(Some(f)) = self.export_audio(p, &opts)
+            && !p.exported.contains(&f)
+        {
+            p.exported.push(f);
+            let _ = self.store().save(p);
+        }
     }
 
     /// 清單用：不含逐字稿。
@@ -659,6 +816,8 @@ impl Shared {
             "exported": p.exported,
             "folder": self.meeting_folder(p),
             "export_files": self.export_files(p),
+            // 原始檔是錄音庫裡的錄音（還沒處理完）：刪掉會議後錄音留在錄音管理
+            "keeps_recording": self.library.id_of(&p.source_file).is_some() && p.source_file.is_file(),
             "stages": Stage::ALL.iter().map(|s| json!({ "id": s, "label": s.label() })).collect::<Vec<_>>(),
         });
         if let (Value::Object(a), Value::Object(b)) = (&mut v, extra) {
@@ -745,8 +904,9 @@ async fn job_runner(shared: Arc<Shared>, mut rx: tmpsc::UnboundedReceiver<Job>) 
         };
         shared.tokens.lock().expect("tokens").remove(&id);
         shared.queue.lock().expect("queue").retain(|x| *x != id);
-        if let Some(p) = finished {
+        if let Some(mut p) = finished {
             if p.status == ProjectStatus::Done {
+                shared.after_done(&mut p);
                 shared.remove_import(&p);
                 shared.toast(false, format!("「{}」處理完成", p.title));
             }
@@ -754,6 +914,32 @@ async fn job_runner(shared: Arc<Shared>, mut rx: tmpsc::UnboundedReceiver<Job>) 
         }
         shared.publish_busy();
     }
+}
+
+/// 音檔的副檔名（小寫）。
+fn audio_ext(f: &Path) -> Option<String> {
+    f.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase).filter(|e| !e.is_empty())
+}
+
+/// 複製錄音到 `dir/<stem>.<副檔名>`：已有一樣大小的就直接用那個檔；不一樣時 `overwrite` 覆蓋，否則另存「名稱 (2)」。
+fn copy_audio(src: &Path, dir: &Path, stem: &str, overwrite: bool) -> Res<PathBuf> {
+    let ext = audio_ext(src).unwrap_or_else(|| "m4a".into());
+    std::fs::create_dir_all(dir).map_err(|e| format!("無法建立 {}：{e}", dir.display()))?;
+    let len = std::fs::metadata(src).map_err(|e| format!("讀不到錄音：{e}"))?.len();
+    let same = |f: &Path| std::fs::metadata(f).is_ok_and(|m| m.len() == len);
+    let first = dir.join(format!("{stem}.{ext}"));
+    let target = if !first.exists() || same(&first) || overwrite {
+        first
+    } else {
+        (2..)
+            .map(|n| dir.join(format!("{stem} ({n}).{ext}")))
+            .find(|f| !f.exists() || same(f))
+            .expect("unbounded")
+    };
+    if !same(&target) {
+        std::fs::copy(src, &target).map_err(|e| format!("無法存錄音：{e}"))?;
+    }
+    Ok(target)
 }
 
 /// 刪匯入區的一個項目（檔案或 `<uuid>` 資料夾）。只會被傳入 imports 資料夾的直接子項目。
@@ -1000,18 +1186,18 @@ mod tests {
         std::fs::write(folder.join("我的筆記.jpg"), b"x").unwrap();
         let view = ok(&b, json!({ "op": "load_project", "id": gone }));
         let listed = view["export_files"].as_array().unwrap().len();
-        assert!(listed >= 3, "docx、md、srt 都列出來，實際 {listed}");
+        assert!(listed >= 2, "md、srt 都列出來（沒有摘要不產 Word、PDF），實際 {listed}");
 
         let r = ok(&b, json!({ "op": "delete_project", "id": gone, "delete_exports": true }));
         assert_eq!(r["deleted"].as_array().unwrap().len(), listed);
         assert!(r["failed"].as_array().unwrap().is_empty());
         assert!(folder.join("我的筆記.jpg").exists(), "不是我們產生的檔留著");
-        assert!(!folder.join("週會.docx").exists());
+        assert!(!folder.join("週會.md").exists());
 
         // 不勾：匯出檔留著
         let r = ok(&b, json!({ "op": "delete_project", "id": keep, "delete_exports": false }));
         assert!(r["deleted"].as_array().unwrap().is_empty());
-        assert!(dir.path().join("exports/留著/留著.docx").exists());
+        assert!(dir.path().join("exports/留著/留著.md").exists());
 
         // 資料夾清空的話一起刪
         std::fs::remove_file(folder.join("我的筆記.jpg")).unwrap();
@@ -1019,6 +1205,132 @@ mod tests {
         ok(&b, json!({ "op": "export", "id": again }));
         ok(&b, json!({ "op": "delete_project", "id": again, "delete_exports": true }));
         assert!(!folder.exists(), "空的會議資料夾一起刪掉");
+    }
+
+    /// 1 秒的靜音 WAV（兩個音訊後端都讀得出長度）。
+    fn wav(path: &std::path::Path) {
+        let rate = 16000u32;
+        let data = vec![0u8; rate as usize * 2];
+        let mut b = Vec::new();
+        b.extend_from_slice(b"RIFF");
+        b.extend_from_slice(&(36 + data.len() as u32).to_le_bytes());
+        b.extend_from_slice(b"WAVEfmt ");
+        b.extend_from_slice(&16u32.to_le_bytes());
+        b.extend_from_slice(&1u16.to_le_bytes());
+        b.extend_from_slice(&1u16.to_le_bytes());
+        b.extend_from_slice(&rate.to_le_bytes());
+        b.extend_from_slice(&(rate * 2).to_le_bytes());
+        b.extend_from_slice(&2u16.to_le_bytes());
+        b.extend_from_slice(&16u16.to_le_bytes());
+        b.extend_from_slice(b"data");
+        b.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        b.extend_from_slice(&data);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, b).unwrap();
+    }
+
+    /// 錄音管理（2026-10-31）：錄完登記、改名、存到手機、轉錄時由會議代表、完成後併進會議、
+    /// 匯出時會議資料夾附一份錄音、刪除會議可一併刪掉那份錄音。
+    #[test]
+    fn recording_library_lifecycle_and_audio_export() {
+        let (dir, b) = bridge();
+        let st = ok(&b, json!({ "op": "state" }));
+        let rec_dir = PathBuf::from(st["recordings_dir"].as_str().unwrap());
+        let file = rec_dir.join(Uuid::new_v4().to_string()).join("會議錄音 2026-10-31 0900.wav");
+        wav(&file);
+        let r = ok(&b, json!({ "op": "add_recording", "path": file, "title": "會議錄音 2026-10-31 0900" }));
+        assert_eq!(r["kind"], "recording");
+        assert_eq!(r["status"], "untranscribed");
+        assert_eq!(r["broken"], false);
+        assert!((r["duration"].as_f64().unwrap() - 1.0).abs() < 0.05, "{r}");
+        let rid = r["id"].as_str().unwrap().to_string();
+
+        // 壞掉的檔（讀不出長度）也收，標成不完整
+        let broken = rec_dir.join(Uuid::new_v4().to_string()).join("壞的.m4a");
+        std::fs::create_dir_all(broken.parent().unwrap()).unwrap();
+        std::fs::write(&broken, b"not audio").unwrap();
+        let bad = ok(&b, json!({ "op": "add_recording", "path": broken, "title": "壞的" }));
+        assert_eq!(bad["broken"], true);
+        ok(&b, json!({ "op": "delete_recording", "id": bad["id"] }));
+        assert!(!broken.exists());
+
+        let v = ok(&b, json!({ "op": "rename_recording", "id": rid, "title": "週會" }));
+        assert_eq!(v["title"], "週會");
+        let saved = ok(&b, json!({ "op": "save_recording", "id": rid, "kind": "recording" }));
+        let saved = PathBuf::from(saved.as_str().unwrap());
+        assert_eq!(saved, dir.path().join("exports/錄音/週會.wav"));
+        assert!(saved.is_file());
+        let again = ok(&b, json!({ "op": "save_recording", "id": rid, "kind": "recording" }));
+        assert_eq!(PathBuf::from(again.as_str().unwrap()), saved, "同一段錄音不會存成「週會 (2)」");
+
+        // 拿去轉錄：清單上由會議代表，錄音庫那筆不另外列、也不能從錄音管理刪
+        let p = ok(&b, json!({ "op": "create_project", "source": file, "title": "週會", "duration": 1.0, "start": false }));
+        let pid = p["id"].as_str().unwrap().to_string();
+        let list = ok(&b, json!({ "op": "list_recordings" }));
+        let list = list.as_array().unwrap();
+        assert_eq!(list.len(), 1, "{list:?}");
+        assert_eq!(list[0]["kind"], "meeting");
+        assert_eq!(PathBuf::from(list[0]["path"].as_str().unwrap()), file, "處理前播原始錄音");
+        let r: Value = serde_json::from_str(&b.call(&json!({ "op": "delete_recording", "id": rid }).to_string())).unwrap();
+        assert_eq!(r["ok"], false);
+
+        // 模擬處理完成：專案資料夾有播放用副本 → 錄音庫那筆併進會議
+        let store = ProjectStore::new(dir.path().join("data/projects"));
+        let mut proj = store.load(Uuid::parse_str(&pid).unwrap()).unwrap();
+        std::fs::copy(&file, store.path_in(proj.id, "playback.wav")).unwrap();
+        proj.playback_file = Some("playback.wav".into());
+        proj.segments.push(meetscribe_core::model::Segment {
+            id: 1, start: 0.0, end: 1.0, timing: meetscribe_core::model::Timing::Model,
+            speaker: None, text: "大家好".into(), chunk: 0, edited: false,
+        });
+        proj.status = ProjectStatus::Done;
+        store.save(&proj).unwrap();
+        b.shared.after_done(&mut proj);
+        assert!(!file.parent().unwrap().exists(), "錄音庫的原檔併進會議後刪掉");
+        let list = ok(&b, json!({ "op": "list_recordings" }));
+        assert_eq!(list.as_array().unwrap().len(), 1);
+        assert_eq!(list[0]["status"], "done");
+        assert_eq!(list[0]["status_label"], "已轉錄");
+        assert_eq!(PathBuf::from(list[0]["path"].as_str().unwrap()), store.path_in(proj.id, "playback.wav"));
+
+        // 匯出：會議資料夾附一份錄音；刪除會議時列進可一起刪的檔
+        let files: Vec<PathBuf> = serde_json::from_value(ok(&b, json!({ "op": "export", "id": pid }))).unwrap();
+        let audio = dir.path().join("exports/週會/週會.wav");
+        assert!(files.contains(&audio), "{files:?}");
+        assert!(audio.is_file());
+        let files2: Vec<PathBuf> = serde_json::from_value(ok(&b, json!({ "op": "export", "id": pid }))).unwrap();
+        assert!(files2.contains(&audio), "再匯出一次沿用同一份錄音");
+        assert!(!dir.path().join("exports/週會/週會 (2).wav").exists());
+        let view = ok(&b, json!({ "op": "load_project", "id": pid }));
+        let listed: Vec<PathBuf> = serde_json::from_value(view["export_files"].clone()).unwrap();
+        assert!(listed.contains(&audio));
+        let r = ok(&b, json!({ "op": "delete_project", "id": pid, "delete_exports": true }));
+        assert!(r["deleted"].as_array().unwrap().iter().any(|f| std::path::Path::new(f.as_str().unwrap()) == audio));
+        assert!(!audio.exists());
+        assert!(saved.is_file(), "存到「錄音」資料夾的那份是使用者的，不跟著刪");
+    }
+
+    #[test]
+    fn export_without_audio_option_skips_the_recording() {
+        let (dir, b) = bridge();
+        let src = dir.path().join("data/imports/a/會議.wav");
+        wav(&src);
+        let p = ok(&b, json!({ "op": "create_project", "source": src, "title": "會議", "start": false }));
+        let store = ProjectStore::new(dir.path().join("data/projects"));
+        let mut proj = store.load(Uuid::parse_str(p["id"].as_str().unwrap()).unwrap()).unwrap();
+        proj.segments.push(meetscribe_core::model::Segment {
+            id: 1, start: 0.0, end: 1.0, timing: meetscribe_core::model::Timing::Model,
+            speaker: None, text: "大家好".into(), chunk: 0, edited: false,
+        });
+        store.save(&proj).unwrap();
+        let mut opts = serde_json::to_value(ExportOptions::default()).unwrap();
+        opts["dir"] = json!(dir.path().join("exports"));
+        opts["audio"] = json!(false);
+        let files: Vec<PathBuf> = serde_json::from_value(ok(&b, json!({ "op": "export", "id": p["id"], "options": opts }))).unwrap();
+        assert!(files.iter().all(|f| f.extension().unwrap() != "wav"), "{files:?}");
+        opts["audio"] = json!(true);
+        let files: Vec<PathBuf> = serde_json::from_value(ok(&b, json!({ "op": "export", "id": p["id"], "options": opts }))).unwrap();
+        assert!(files.iter().any(|f| f.extension().unwrap() == "wav"), "還沒處理完的會議用原始錄音：{files:?}");
     }
 
     #[test]

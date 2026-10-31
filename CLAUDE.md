@@ -25,7 +25,7 @@ $src = "$PWD"; robocopy $src "Y:\5. NVIDIA Nemotron 3.5 Transcribe 逐字稿轉�
 - `crates/meetscribe-core`：全部邏輯。`pipeline.rs` 串起五個階段（前處理→轉錄→說話者分配→整合→摘要），每階段完成就存檔、可續跑。
 - `crates/meetscribe-app`：egui 桌面程式。`worker.rs` 自帶 tokio runtime，UI 只透過 `Cmd`／`Msg` 跟它講話；`views/` 每個畫面一檔，畫面上的動作先收成 `Action` 畫完再套用（避免同時借用 `MeetApp` 多個欄位）。
 - `crates/meetscribe-cli`：同一個 core 的命令列入口。
-- `crates/meetscribe-android`：Android 的 JNI 橋（`libmeetscribe_android.so`）。`bridge.rs` 平台無關、桌面可測；`lib.rs` 只做 JNI 轉接。
+- `crates/meetscribe-android`：Android 的 JNI 橋（`libmeetscribe_android.so`）。`bridge.rs` 平台無關、桌面可測；`recordings.rs` 是錄音庫；`lib.rs` 只做 JNI 轉接。
 - `android/`：Kotlin＋Compose 的 App 外殼，所有邏輯都經 `core/Repo.kt` 呼叫 Rust。見下方〈Android〉。
 
 名稱：使用者看得到的一律叫「語音轉錄」（2026-10-31 改名）。crate 名、`MeetScribe-*.exe/.apk` 檔名、Inno `AppId`、安裝資料夾 `MeetScribe`、
@@ -54,8 +54,16 @@ $src = "$PWD"; robocopy $src "Y:\5. NVIDIA Nemotron 3.5 Transcribe 逐字稿轉�
 刻意不由 AI 建 `.lnk`：全域 CLAUDE.md〈防毒〉記過「claude.exe 建指向自編未簽章 exe 的捷徑」被 Bitdefender 判刑；要 `.lnk` 請使用者自己「傳送到桌面」。
 程式開著時 exe 被鎖住，`cargo build --release` 會失敗——先關視窗再建。
 
+匯出（2026-10-31 使用者：「docx更新成不放逐字稿，PDF是從Docx轉成PDF 輸出檔案也加入PDF並預設勾選」）：Word、PDF 是 `summary_only()` 的格式，
+固定只放摘要（＋會議資訊、發言者表），沒有摘要就不產；逐字稿在 Markdown、純文字、字幕。`ExportOptions.content` 只管 Markdown／純文字。
+PDF 是 `export/pdf.rs` 照 docx 模組的版面直接畫（krilla，手機沒有 Word／LibreOffice 能轉）：色票、字級、標題區、表格都從 `docx::` 的常數與
+共用的 `md_blocks` 來，**改 Word 版面時 PDF 要一起改**。字型讀系統的（Windows `msjh.ttc`、Android `/system/fonts/NotoSansCJK-Regular.ttc` 挑 TC），
+補字用 Segoe UI Symbol／Noto Symbols（☐☑●）；`MEETSCRIBE_PDF_FONT` 可指定。看版面：`cargo test -p meetscribe-core --lib export::tests::pdf` 會寫
+`target/pdf-shots/摘要.pdf`／`.docx`。設定檔 schema 3 對舊設定補勾 PDF 一次。
+`ExportOptions.audio`（會議資料夾附一份錄音）只有 Android 的 bridge 用，core 不讀。
+
 擴充點：新供應商實作 `providers::Transcriber`／`LlmClient`，在 `Engine::from_settings` 接上；新匯出格式實作 `export::Exporter`，登記進 `export::registry()`
-（會放摘要的格式讓 `has_summary()` 回 true，`ExportOptions` 的「內容」才對它有作用）。輸出選項的 UI 只有一份：`widgets::export_options`，設定頁、新增轉錄、匯出頁共用。提示詞在 `prompts.rs`，使用者可用 `%APPDATA%\MeetScribe\prompts\<名稱>.md` 覆寫——`attribution`／`reconcile` 的 JSON 格式是程式解析的契約，改提示詞時保持格式。
+（摘要＋逐字稿都能放的格式讓 `has_summary()` 回 true，`ExportOptions` 的「內容」才對它有作用；只放摘要的用 `summary_only()`）。輸出選項的 UI 只有一份：`widgets::export_options`，設定頁、新增轉錄、匯出頁共用。提示詞在 `prompts.rs`，使用者可用 `%APPDATA%\MeetScribe\prompts\<名稱>.md` 覆寫——`attribution`／`reconcile` 的 JSON 格式是程式解析的契約，改提示詞時保持格式。
 
 ## 推送更新（2026-10-31）
 
@@ -110,6 +118,7 @@ $src = "$PWD"; robocopy $src "Y:\5. NVIDIA Nemotron 3.5 Transcribe 逐字稿轉�
 - 分頁檔小：rustc 會報 `os error 1455`／`STATUS_STACK_BUFFER_OVERRUN`。已用 `.cargo/config.toml` 的 `jobs = 3` 與 `[profile.dev] debug = 0` 壓住；別另開 `CARGO_TARGET_DIR`（整套重編會再撞記憶體）。
 - reqwest 0.13 用 `native-tls`（`rustls` 預設走 aws-lc-rs 要 cmake）；`.query()` 要 `query` feature。
 - 含反斜線或 `"#` 的補丁：用 Python 腳本檔（scratchpad），別用 Bash heredoc；Rust 原始字串內含 `"#` 時用 `r##"…"##`。
+  Python 讀寫要用 `read_bytes`／`write_bytes`：`write_text` 在 Windows 會把整檔寫成 CRLF；`"\u0000"` 寫進 Kotlin 原始碼前確認是跳脫字面、不是真的 NUL。
 
 ## Android
 
@@ -128,8 +137,15 @@ $src = "$PWD"; robocopy $src "Y:\5. NVIDIA Nemotron 3.5 Transcribe 逐字稿轉�
 - 匯出預設在公開的「文件/語音轉錄」（`core/Storage.kt`；寫不進去才退回 App 的外部檔案區）。1.0 存的 `…/Android/data/…` 由 `bridge::migrate_export_dir` 換過去，使用者自選的資料夾不動。
   會議頁「開啟資料夾」用 `DocumentsContract` 的 externalstorage URI 開系統檔案 App（只對共用儲存空間有效）；分享經 FileProvider（`file_paths.xml` 開放 `Documents/`）。
 - 刪除會議可一併刪匯出檔：只刪 `bridge::export_files` 列的（`exported` 記錄＋專屬子資料夾裡檔名以會議開頭的匯出格式），不碰使用者自己放的檔。
-- App 內錄音：`service/RecorderService.kt`（前景服務 microphone，AAC m4a 直接寫進 imports），錄完由 `Recording.finished` 帶進新增轉錄頁。
+- App 內錄音：`service/RecorderService.kt`（前景服務 microphone，AAC m4a 直接寫進錄音庫），停止後 `Repo.recordingStopped` 登記；從新增轉錄錄的再由 `Recording.finished` 帶進表單。
 - 匯入檔放 `files/data/imports/<uuid>/<原檔名>`；完成或刪除專案時刪掉，App 啟動時清掉沒有專案在用的。
+- 錄音管理（2026-10-31 使用者：「多做一個頁面 錄音管理 不管有沒有轉錄」）：App 錄的音檔放 `files/data/recordings/<uuid>/`＋`info.json`
+  （`recordings.rs`），**永久保存**（1.1 錄在 imports，沒轉錄就被清掉）。錄音機停止 → `add_recording` 登記；開 App 時 `recover` 補登記錄到一半被殺的
+  （讀不出長度標 `broken`）。拿去轉錄時專案的 `source_file` 直接指向錄音庫的檔；處理完成且專案資料夾有 `playback.*` 後 `after_done` 刪掉錄音庫那筆
+  （併進會議，不存兩份）。`list_recordings` ＝還沒建會議的錄音庫錄音＋每場會議；已建會議的錄音由會議代表、不另外列。刪掉未完成的會議時錄音留在錄音庫
+  （`keeps_recording`）。`Recording.start(ctx, transcribe)`：從新增轉錄錄的停止後帶進表單，從錄音管理錄的只存起來。
+- 匯出附錄音：會議資料夾放 `<檔名>.<原副檔名>`（播放檔，不重壓），已有同大小的不再寫；記進 `exported`、刪除會議時可一起刪。
+  分享錄音（`Files.shareAudio`）先以會議名稱複製到 `cache/share/` 再分享（FileProvider `cache-path`），對方收到的才不是 `playback.m4a`。
 
 閉環測試（模擬器）：AVD `meetscribe_test`（API 36 x86_64）。主機跑 `python -I android/test/mock_api.py <資料夾> [延遲秒]`，用法在檔頭；
 `android/test/ui.ps1` 用 uiautomator 依文字點擊、截圖。真的金鑰由使用者自己在 App 裡貼，測試流程不從認證管理員取出金鑰。

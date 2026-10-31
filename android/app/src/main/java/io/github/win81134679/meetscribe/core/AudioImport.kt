@@ -57,19 +57,6 @@ object AudioImport {
         }
     }
 
-    /** App 內錄好的檔（已經在 imports/<uuid>/ 裡）：只讀長度，讀不到就交給系統解碼器轉 WAV。 */
-    suspend fun fromFile(file: File, displayName: String): ImportedAudio = withContext(Dispatchers.IO) {
-        probe(file)?.let { return@withContext ImportedAudio(file, displayName, it) }
-        val wav = File(file.parentFile, "${file.nameWithoutExtension}.wav")
-        try {
-            decodeToWav(file, wav)
-        } catch (e: Exception) {
-            throw BridgeError("讀不到錄好的音檔：${e.message ?: e.javaClass.simpleName}")
-        }
-        file.delete()
-        ImportedAudio(wav, displayName, probe(wav) ?: throw BridgeError("讀不到錄好的音檔"))
-    }
-
     /** 丟掉一個還沒開始轉錄的匯入（整個 imports/<uuid> 資料夾）。 */
     fun discard(a: ImportedAudio) {
         val dir = a.file.parentFile ?: return
