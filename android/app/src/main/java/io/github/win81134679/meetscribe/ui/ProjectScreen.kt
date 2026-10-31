@@ -3,6 +3,8 @@ package io.github.win81134679.meetscribe.ui
 import android.media.MediaPlayer
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -79,6 +81,9 @@ fun ProjectScreen(id: String, onBack: () -> Unit) {
     val busySet by Repo.busy.collectAsState()
     val busy = id in busySet
     var tab by rememberSaveable(id) { mutableIntStateOf(0) }
+    // 四個分頁可以左右滑動切換（2026-10-31 使用者：「按進去會議逐字稿頁面沒辦法左右滑」）
+    val pager = rememberPagerState(initialPage = tab) { 4 }
+    LaunchedEffect(pager.currentPage) { tab = pager.currentPage }
     var menu by remember { mutableStateOf(false) }
     var renaming by remember { mutableStateOf(false) }
     var confirmDelete by remember { mutableStateOf(false) }
@@ -135,17 +140,23 @@ fun ProjectScreen(id: String, onBack: () -> Unit) {
             return@Column
         }
         StatusPanel(proj, busy)
-        PrimaryTabRow(selectedTabIndex = tab) {
+        PrimaryTabRow(selectedTabIndex = pager.currentPage) {
             listOf("逐字稿", "摘要", "說話者", "匯出").forEachIndexed { i, t ->
-                Tab(selected = tab == i, onClick = { tab = i }, text = { Text(t) })
+                Tab(
+                    selected = pager.currentPage == i,
+                    onClick = { scope.launch { pager.animateScrollToPage(i) } },
+                    text = { Text(t) },
+                )
             }
         }
-        Box(Modifier.weight(1f)) {
-            when (tab) {
-                0 -> TranscriptTab(proj, busy, player)
-                1 -> SummaryTab(proj, busy)
-                2 -> SpeakersTab(proj, busy)
-                else -> ExportTab(proj)
+        HorizontalPager(state = pager, modifier = Modifier.weight(1f), verticalAlignment = Alignment.Top) { page ->
+            Box(Modifier.fillMaxSize()) {
+                when (page) {
+                    0 -> TranscriptTab(proj, busy, player)
+                    1 -> SummaryTab(proj, busy)
+                    2 -> SpeakersTab(proj, busy)
+                    else -> ExportTab(proj)
+                }
             }
         }
     }

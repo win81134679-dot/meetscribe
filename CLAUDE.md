@@ -50,6 +50,7 @@ $src = "$PWD"; robocopy $src "Y:\5. NVIDIA Nemotron 3.5 Transcribe 逐字稿轉�
 1.0.0 沒有更新功能，已裝 1.0.0 的電腦／手機要手動裝一次 1.1.0，之後才會自己更新。
 1.1.1（刪除會議可一併刪匯出檔、說話者辨識不卡、Word 排版）同日發佈給所有裝置，`update_check` 對真的 GitHub 確認 1.1.0 會挑到它。
 1.2.0（錄音管理、匯出附錄音、分享錄音、PDF、Word 只放摘要）同日發佈給所有裝置：線上 update.json 驗簽、雜湊與建置輸出相同，`update_check` 從 1.1.1 兩個平台都挑到它。
+1.2.1（手機會議頁四個分頁可左右滑動，`HorizontalPager`）只發 Android（`--only android`；`update::pick` 會跳過沒有該平台安裝檔的 Release，電腦版停在 1.2.0）。
 建 APK 時模擬器要先關（`adb emu kill`）：兩個一起開 Gradle daemon 會被系統砍掉（記憶體不夠）。
 建置時記憶體吃緊（可用虛擬記憶體不到 2 GB）連 `-j 1` 都會 OOM，請使用者先關程式，不要改 LTO 或另開 target 目錄硬編。
 快速開啟：專案根目錄的 `開啟 語音轉錄.cmd`（`%~dp0` 相對路徑，不寫死中文路徑）指向 `target\release\meetscribe-app.exe`。
