@@ -1,6 +1,8 @@
 package io.github.win81134679.meetscribe.ui
 
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.background
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -13,12 +15,18 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Checkbox
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.ExposedDropdownMenuAnchorType
+import androidx.compose.material3.ExposedDropdownMenuBox
+import androidx.compose.material3.ExposedDropdownMenuDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -27,6 +35,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -73,7 +82,7 @@ fun SettingsScreen() {
             )
             Spacer(Modifier.height(6.dp))
             KeyBox(
-                "google", "Google AI Studio（說話者與摘要，免費額度）", "AIza…",
+                "google", "Google AI Studio（說話者辨識，免費額度）", "AIza…",
                 listOf("取得金鑰" to Links.GOOGLE_AI_STUDIO_KEYS),
             )
         }
@@ -82,8 +91,8 @@ fun SettingsScreen() {
             ModelPicker("說話者分配（要能聽音訊）", "attribution", settings) { p, m ->
                 save { put("attribution_provider", p); put("attribution_model", m) }
             }
-            ModelPicker("說話者整合與摘要", "summary", settings) { p, m ->
-                save { put("summary_provider", p); put("summary_model", m) }
+            SummaryModelPicker(settings.optString("summary_model")) { m ->
+                save { put("summary_provider", "OpenRouter"); put("summary_model", m) }
             }
             SelectRow("摘要語言", OUTPUT_LANGUAGES, settings.optString("output_language", "zh-TW")) {
                 save { put("output_language", it) }
@@ -128,6 +137,93 @@ fun SettingsScreen() {
         }
         Spacer(Modifier.height(8.dp))
     }
+}
+
+/**
+ * 摘要模型的下拉選單（2026-10-31 使用者：「OPENROTUER 是下拉選單的選取模型 一定要標注免費/付費」「越推薦的越上面 但免費的優先再付費的」）。
+ * 打字可以篩選；每項標免費／付費（付費附費率）、推薦；下面「在 OpenRouter 看費率」開該模型的官網頁。手機沒有 Claude Code，只列 OpenRouter。
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun SummaryModelPicker(current: String, onChange: (String) -> Unit) {
+    val ctx = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val pal = Pal.current
+    val loaded by Repo.summaryModels.collectAsState()
+    LaunchedEffect(Unit) { if (Repo.summaryModels.value?.isSuccess != true) Repo.tryCall("load_summary_models") }
+    val list = loaded?.getOrNull().orEmpty()
+    val selected = list.firstOrNull { it.id == current }
+    var expanded by remember { mutableStateOf(false) }
+    var query by remember { mutableStateOf("") }
+    val shown = list.filter { query.isBlank() || it.name.contains(query, true) || it.id.contains(query, true) }
+
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Text("說話者整合與摘要", fontWeight = FontWeight.Medium)
+        ExposedDropdownMenuBox(expanded = expanded, onExpandedChange = { expanded = it }) {
+            OutlinedTextField(
+                // 收起來時只放名稱（免費／付費與費率在欄位下面，長名稱才不會把標示擠掉）
+                value = if (expanded) query else selected?.name ?: current,
+                onValueChange = { query = it; expanded = true },
+                label = { Text("摘要模型") },
+                placeholder = { Text("搜尋模型") },
+                singleLine = true,
+                trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded) },
+                modifier = Modifier.fillMaxWidth().menuAnchor(ExposedDropdownMenuAnchorType.PrimaryEditable),
+            )
+            ExposedDropdownMenu(expanded = expanded, onDismissRequest = { expanded = false; query = "" }) {
+                when {
+                    loaded == null -> DropdownMenuItem(text = { Text("載入 OpenRouter 模型清單中…") }, onClick = {}, enabled = false)
+                    loaded!!.isFailure -> DropdownMenuItem(
+                        text = { Text("載入失敗：${loaded!!.exceptionOrNull()?.message}。點這裡重試", color = pal.danger) },
+                        onClick = { Repo.summaryModels.value = null; scope.launch { Repo.tryCall("load_summary_models") } },
+                    )
+                }
+                var group: Boolean? = null
+                for (m in shown) {
+                    if (group != m.free) {
+                        group = m.free
+                        DropdownMenuItem(
+                            text = {
+                                Text(
+                                    if (m.free) "免費模型" else "付費模型（從你的 OpenRouter 餘額扣款）",
+                                    color = if (m.free) pal.success else pal.warning, fontWeight = FontWeight.SemiBold,
+                                    style = MaterialTheme.typography.labelLarge,
+                                )
+                            },
+                            onClick = {}, enabled = false,
+                        )
+                    }
+                    DropdownMenuItem(
+                        text = {
+                            Column {
+                                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                    Text(m.name, fontWeight = if (m.id == current) FontWeight.SemiBold else FontWeight.Normal, modifier = Modifier.weight(1f, fill = false))
+                                    if (m.recommended) ModelBadge("推薦", pal.accentStrong)
+                                    ModelBadge(if (m.free) "免費" else "付費", if (m.free) pal.success else pal.warning)
+                                }
+                                if (!m.free) Text(m.price.removePrefix("付費 · "), color = pal.textMuted, style = MaterialTheme.typography.bodySmall)
+                            }
+                        },
+                        onClick = { expanded = false; query = ""; if (m.id != current) onChange(m.id) },
+                    )
+                }
+            }
+        }
+        selected?.let { Text(it.price, color = if (it.free) pal.success else pal.warning, style = MaterialTheme.typography.bodySmall) }
+        TextButton(onClick = { Files.openUrl(ctx, selected?.url ?: "https://openrouter.ai/$current") }) { Text("在 OpenRouter 看費率 ↗") }
+        Text(
+            "用你的 OpenRouter 金鑰。預設是免費模型；選付費模型會從 OpenRouter 餘額扣款。",
+            color = pal.textMuted, style = MaterialTheme.typography.bodySmall,
+        )
+    }
+}
+
+@Composable
+private fun ModelBadge(text: String, color: androidx.compose.ui.graphics.Color) {
+    Text(
+        text, color = color, style = MaterialTheme.typography.labelSmall,
+        modifier = Modifier.background(color.copy(alpha = 0.12f), RoundedCornerShape(50)).padding(horizontal = 8.dp, vertical = 2.dp),
+    )
 }
 
 @Composable

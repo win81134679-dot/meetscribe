@@ -237,7 +237,7 @@ fn account_bar(app: &mut MeetApp, ui: &mut egui::Ui) {
                     }
                     if !app.has_google_key
                         && theme::ghost(ui, Some(icon::INFO), "Gemini 免費金鑰", Some(p.accent_strong))
-                            .on_hover_text("設定後說話者辨識與摘要改用 Gemini 免費額度")
+                            .on_hover_text("設定後說話者辨識改用 Gemini 免費額度（聽音訊分辨誰在說話）")
                             .clicked()
                     {
                         app.settings_form = crate::views::settings::SettingsForm::new(&app.settings);
@@ -426,9 +426,9 @@ pub fn show(app: &mut MeetApp, ui: &mut egui::Ui) {
             );
             if app.new_job.generate_summary {
                 ui.add_space(4.0);
-                theme::label(ui, "摘要方式");
+                theme::label(ui, "摘要模型");
                 let mut s = app.settings.clone();
-                if widgets::summary_mode_picker(ui, &mut s, "job_summary_mode") {
+                if widgets::summary_model_picker(ui, &mut s, app.or_models.as_ref(), "job_summary_mode") {
                     app.apply_settings(s);
                 }
                 ui.add_space(4.0);
@@ -465,8 +465,16 @@ pub fn show(app: &mut MeetApp, ui: &mut egui::Ui) {
                 let cost = price
                     .map(|x| format!("　逐字稿約 US${:.2}", x * total))
                     .unwrap_or_default();
+                // 摘要選了 OpenRouter 的付費模型時要講清楚（2026-10-31 起摘要模型可選付費）
+                let s = &app.settings;
+                let paid_summary = s.summary_provider == meetscribe_core::config::LlmProvider::OpenRouter
+                    && !s.summary_model.ends_with(":free")
+                    && app.or_models.as_ref().and_then(|r| r.as_ref().ok()).is_none_or(|l| {
+                        l.iter().find(|m| m.id == s.summary_model).is_none_or(|m| !m.is_free())
+                    });
+                let rest = if paid_summary { "　摘要用付費模型（另計）" } else { "　說話者與摘要免費" };
                 ui.label(
-                    RichText::new(format!("總長 {}{cost}　說話者與摘要免費", fmt_duration_zh(total)))
+                    RichText::new(format!("總長 {}{cost}{rest}", fmt_duration_zh(total)))
                         .color(p.text_muted),
                 );
             }

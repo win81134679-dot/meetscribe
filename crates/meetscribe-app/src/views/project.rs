@@ -144,7 +144,11 @@ pub fn show(app: &mut MeetApp, ui: &mut Ui, id: Uuid) {
     match app.project_ui.tab {
         Tab::Summary => {
             let settings = app.settings.clone();
-            let sync = ContentSync { peers: !app.transfer.peers.is_empty(), has_previous: transfer::has_previous_content(&app.store, id) };
+            let sync = ContentSync {
+                peers: !app.transfer.peers.is_empty(),
+                has_previous: transfer::has_previous_content(&app.store, id),
+                models: app.or_models.as_ref(),
+            };
             summary_tab(
                 ui,
                 &mut app.projects[idx],
@@ -390,13 +394,14 @@ fn log_text(ui: &Ui, level: LogLevel, text: &str) -> RichText {
 
 // ---------- 摘要 ----------
 
-/// 摘要頁的「同步到其他裝置」與「還原上一版」要不要顯示。
+/// 摘要頁要用到的其他狀態：「同步到其他裝置」與「還原上一版」要不要顯示、摘要模型清單。
 #[derive(Clone, Copy)]
-struct ContentSync {
+struct ContentSync<'a> {
     /// 有配對的裝置。
     peers: bool,
     /// 收過別台的內容更新，可以還原。
     has_previous: bool,
+    models: Option<&'a Result<Vec<meetscribe_core::openrouter::ModelInfo>, String>>,
 }
 
 fn summary_tab(
@@ -405,15 +410,15 @@ fn summary_tab(
     st: &mut ProjectUi,
     settings: &Settings,
     editable: bool,
-    sync: ContentSync,
+    sync: ContentSync<'_>,
     actions: &mut Vec<Action>,
 ) {
     let pl = pal(ui);
     theme::card(ui, |ui| {
         ui.horizontal_wrapped(|ui| {
-            theme::label(ui, "摘要方式");
+            theme::label(ui, "摘要模型");
             let mut s = settings.clone();
-            if widgets::summary_mode_picker(ui, &mut s, "tab_summary_mode") {
+            if widgets::summary_model_picker(ui, &mut s, sync.models, "tab_summary_mode") {
                 actions.push(Action::Settings(Box::new(s)));
             }
             ui.add(

@@ -57,6 +57,9 @@ data class Segment(
 
 data class Summary(val markdown: String, val model: String, val createdAt: String, val instructions: String)
 
+/** 摘要模型下拉選單的一項（OpenRouter）。`price`：「免費」或「付費 · 輸入 $…／輸出 $…（每百萬 tokens）」；`url`：OpenRouter 官網的模型頁。 */
+data class SummaryModel(val id: String, val name: String, val free: Boolean, val recommended: Boolean, val price: String, val url: String)
+
 data class ProjectDetail(
     val summary: ProjectSummary,
     val audioPath: String?,

@@ -27,7 +27,7 @@
 <div class="diagram-container">
 <svg viewBox="0 0 1280 904" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="ms-arch-title ms-arch-desc">
 <title id="ms-arch-title">語音轉錄 執行架構圖</title>
-<desc id="ms-arch-desc">使用者把錄音拖進語音轉錄桌面程式，或在 Android App 選擇、分享錄音；兩邊共用同一個 Rust 處理核心，在本機轉檔切段（電腦用 ffmpeg，手機用內建解碼與 MP3 編碼）、存專案資料；逐字稿送 OpenRouter 上付費的 Nemotron 3.5 Transcribe，說話者分配、整合與摘要預設用 Google AI Studio 的 Gemini 免費額度，沒有 Google Key 時改用 OpenRouter 免費模型，摘要在電腦版也可手動改用本機 Claude Code CLI。</desc>
+<desc id="ms-arch-desc">使用者把錄音拖進語音轉錄桌面程式，或在 Android App 選擇、分享錄音；兩邊共用同一個 Rust 處理核心，在本機轉檔切段（電腦用 ffmpeg，手機用內建解碼與 MP3 編碼）、存專案資料；逐字稿送 OpenRouter 上付費的 Nemotron 3.5 Transcribe，說話者分配用 Google AI Studio 的 Gemini 免費額度聽音訊（沒有 Google Key 時改用 OpenRouter 免費模型），整合與摘要用 OpenRouter 上選的模型（預設免費、可選付費），摘要在電腦版也可手動改用本機 Claude Code CLI。</desc>
 <defs>
 <marker id="ms-arch-arr-in" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#2196f3"/></marker>
 <marker id="ms-arch-arr-proc" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#3949ab"/></marker>
@@ -51,7 +51,7 @@
 <line x1="544" y1="242" x2="598" y2="242" stroke="#3949ab" stroke-width="1.2" marker-end="url(#ms-arch-arr-proc)"/>
 <line x1="840" y1="242" x2="918" y2="242" stroke="#e27e00" stroke-width="1.6" marker-end="url(#ms-arch-arr-accent)"/>
 <path d="M 840,268 H 876 Q 884,268 884,276 V 444 Q 884,452 892,452 H 918" fill="none" stroke="#3949ab" stroke-width="1.2" marker-end="url(#ms-arch-arr-proc)"/>
-<path d="M 840,294 H 864 Q 872,294 872,302 V 596 Q 872,604 880,604 H 918" fill="none" stroke="#3949ab" stroke-width="1.2" stroke-dasharray="5,4" marker-end="url(#ms-arch-arr-proc)"/>
+<path d="M 840,294 H 864 Q 872,294 872,302 V 596 Q 872,604 880,604 H 918" fill="none" stroke="#3949ab" stroke-width="1.2" marker-end="url(#ms-arch-arr-proc)"/>
 <line x1="720" y1="320" x2="720" y2="406" stroke="#3949ab" stroke-width="1.2" marker-end="url(#ms-arch-arr-proc)"/>
 <path d="M 600,268 H 580 Q 572,268 572,276 V 444 Q 572,452 564,452 H 546" fill="none" stroke="#3949ab" stroke-width="1.2" marker-end="url(#ms-arch-arr-proc)"/>
 <path d="M 600,294 H 592 Q 584,294 584,302 V 596 Q 584,604 576,604 H 546" fill="none" stroke="#3949ab" stroke-width="1.2" stroke-dasharray="5,4" marker-end="url(#ms-arch-arr-proc)"/>
@@ -146,16 +146,16 @@
 <text x="938" y="423" class="t-tag" fill="#8b23a7" text-anchor="middle">AI</text>
 <text x="1064" y="446" class="t-name" fill="#14213d" text-anchor="middle">Gemini Flash（免費額度）</text>
 <text x="1064" y="466" class="t-mono" fill="#44506b" text-anchor="middle">Google AI Studio · generateContent</text>
-<text x="1064" y="484" class="t-sub" fill="#44506b" text-anchor="middle">聽音訊分配說話者・整合・摘要</text>
+<text x="1064" y="484" class="t-sub" fill="#44506b" text-anchor="middle">聽音訊分配說話者（沒 Key 改 :free）</text>
 
-<!-- 節點：OpenRouter 免費備援（可選，黃虛線） -->
+<!-- 節點：OpenRouter 摘要模型（AI，紫）：下拉選單選，預設免費、可選付費（2026-10-31） -->
 <rect x="920" y="560" width="288" height="88" rx="6" fill="#f4f7fb"/>
-<rect x="920" y="560" width="288" height="88" rx="6" fill="#f6eaca" stroke="#d8a527" stroke-width="1.2" stroke-dasharray="4,3"/>
-<rect x="928" y="566" width="28" height="12" rx="2" fill="none" stroke="#d8a527" stroke-opacity="0.8" stroke-width="0.8"/>
-<text x="942" y="575" class="t-tag" fill="#836417" text-anchor="middle">OPT</text>
-<text x="1064" y="598" class="t-name" fill="#14213d" text-anchor="middle">OpenRouter 免費模型</text>
-<text x="1064" y="618" class="t-mono" fill="#44506b" text-anchor="middle">nemotron-…-omni / -ultra :free</text>
-<text x="1064" y="636" class="t-sub" fill="#44506b" text-anchor="middle">沒設 Google Key 時自動改用</text>
+<rect x="920" y="560" width="288" height="88" rx="6" fill="#dcc4e8" stroke="#8e24aa" stroke-width="1.2"/>
+<rect x="928" y="566" width="20" height="12" rx="2" fill="none" stroke="#8e24aa" stroke-opacity="0.6" stroke-width="0.8"/>
+<text x="938" y="575" class="t-tag" fill="#8b23a7" text-anchor="middle">AI</text>
+<text x="1064" y="598" class="t-name" fill="#14213d" text-anchor="middle">OpenRouter 摘要模型</text>
+<text x="1064" y="618" class="t-mono" fill="#44506b" text-anchor="middle">預設 nemotron-3-ultra :free</text>
+<text x="1064" y="636" class="t-sub" fill="#44506b" text-anchor="middle">整合・摘要；下拉選免費或付費</text>
 
 <!-- 節點：傳到其他裝置（外部，灰藍）：自己配對的裝置之間互傳，Cloudflare 中轉站只轉手密文（1.3） -->
 <rect x="64" y="560" width="200" height="88" rx="6" fill="#f4f7fb"/>

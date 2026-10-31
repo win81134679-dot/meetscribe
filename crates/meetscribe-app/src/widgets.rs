@@ -5,6 +5,7 @@ use egui::{Color32, RichText, Ui};
 use meetscribe_core::config::{LlmProvider, Settings};
 use meetscribe_core::export::{self, Content, ExportOptions};
 use meetscribe_core::model::{Project, ProjectStatus};
+use meetscribe_core::openrouter::{self, ModelInfo};
 use std::path::PathBuf;
 
 /// 說話者顏色：12 色輪替，跟 Soft 主題的柔和色調搭配，深淺色都看得清楚。
@@ -60,36 +61,116 @@ pub fn status_badge(ui: &mut Ui, status: &ProjectStatus) -> egui::Response {
     theme::badge(ui, status.label(), c)
 }
 
-/// 摘要方式快速切換（免費為主，可手動改用本機 Claude Code CLI）。回傳是否有改。
-pub fn summary_mode_picker(ui: &mut Ui, settings: &mut Settings, id: &str) -> bool {
-    let current = settings.summary_provider;
-    let label = |p: LlmProvider| match p {
-        LlmProvider::Google => "免費模型（Gemini 免費額度）",
-        LlmProvider::ClaudeCode => "本機 Claude Code CLI",
-        LlmProvider::OpenRouter => "OpenRouter（自選模型）",
+/// 摘要模型的下拉選單（2026-10-31 使用者：「OPENROTUER 是下拉選單的選取模型 一定要標注免費/付費」「越推薦的越上面 但免費的優先再付費的」）。
+/// 清單是 OpenRouter 上能寫摘要的模型（`openrouter::summary_models` 排好序：免費組在前、各組推薦的在前），另加本機 Claude Code CLI。
+/// 選單旁邊是「在 OpenRouter 看費率」直接開該模型的官網頁。`models` 是啟動時載入的清單（還沒載好是 None）。回傳是否有改。
+pub fn summary_model_picker(
+    ui: &mut Ui,
+    settings: &mut Settings,
+    models: Option<&Result<Vec<ModelInfo>, String>>,
+    id: &str,
+) -> bool {
+    let p = pal(ui);
+    let list = match models {
+        Some(Ok(l)) => openrouter::summary_models(l),
+        _ => Vec::new(),
     };
-    let mut chosen = current;
+    let claude = settings.summary_provider == LlmProvider::ClaudeCode;
+    let current = list.iter().find(|m| m.id == settings.summary_model);
+    let selected = if claude {
+        "本機 Claude Code CLI".to_string()
+    } else {
+        match current {
+            Some(m) => format!("{}　{}", m.name, if m.is_free() { "免費" } else { "付費" }),
+            None => settings.summary_model.clone(),
+        }
+    };
+    let filter_id = egui::Id::unique((id, "summary-model-filter"));
+    let mut filter: String = ui.data_mut(|d| d.get_temp(filter_id).unwrap_or_default());
+    let mut chosen: Option<(LlmProvider, String)> = None;
     let combo = egui::ComboBox::from_id_salt(id)
-        .selected_text(label(current))
-        .width(250.0)
+        .selected_text(selected)
+        .width(320.0)
+        .height(440.0)
+        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
         .show_ui(ui, |ui| {
-            ui.selectable_value(&mut chosen, LlmProvider::Google, label(LlmProvider::Google))
-                .on_hover_text("預設。需要 Google AI Studio Key；沒有的話自動改用 OpenRouter 上的免費模型");
-            ui.selectable_value(&mut chosen, LlmProvider::ClaudeCode, label(LlmProvider::ClaudeCode))
-                .on_hover_text("用你電腦上已登入的 Claude Code（claude -p）寫摘要，走你的 Claude 訂閱");
-            if current == LlmProvider::OpenRouter {
-                ui.selectable_value(&mut chosen, LlmProvider::OpenRouter, label(LlmProvider::OpenRouter));
+            ui.set_min_width(460.0);
+            ui.add(egui::TextEdit::singleline(&mut filter).hint_text("搜尋模型").desired_width(f32::INFINITY));
+            if ui
+                .selectable_label(claude, "本機 Claude Code CLI（用你的 Claude 訂閱）")
+                .clicked()
+            {
+                chosen = Some((LlmProvider::ClaudeCode, meetscribe_core::config::DEFAULT_SUMMARY_MODEL_CLAUDE_CODE.into()));
+            }
+            match models {
+                None => {
+                    ui.label(RichText::new("載入 OpenRouter 模型清單中…").color(p.text_muted));
+                }
+                Some(Err(e)) => {
+                    ui.label(RichText::new(format!("載入 OpenRouter 模型清單失敗：{e}")).color(p.danger));
+                }
+                Some(Ok(_)) => {}
+            }
+            let f = filter.trim().to_lowercase();
+            let mut group: Option<bool> = None;
+            for m in list
+                .iter()
+                .filter(|m| f.is_empty() || m.id.to_lowercase().contains(&f) || m.name.to_lowercase().contains(&f))
+            {
+                let free = m.is_free();
+                if group != Some(free) {
+                    ui.add_space(4.0);
+                    ui.separator();
+                    ui.label(
+                        theme::bold(if free { "免費模型" } else { "付費模型（從你的 OpenRouter 餘額扣款）" }, 13.0)
+                            .color(if free { p.success } else { p.warning }),
+                    );
+                    group = Some(free);
+                }
+                let rec = openrouter::recommend_rank(&m.id).is_some();
+                ui.horizontal(|ui| {
+                    let on = !claude && m.id == settings.summary_model;
+                    if ui.selectable_label(on, &m.name).on_hover_text(&m.id).clicked() {
+                        chosen = Some((LlmProvider::OpenRouter, m.id.clone()));
+                    }
+                    if rec {
+                        theme::badge(ui, "推薦", p.accent_strong);
+                    }
+                    if free {
+                        theme::badge(ui, "免費", p.success);
+                    } else {
+                        theme::badge(ui, "付費", p.warning);
+                        ui.label(RichText::new(m.price_label().trim_start_matches("付費 · ")).size(11.5).color(p.text_muted));
+                    }
+                });
+            }
+            if chosen.is_some() {
+                ui.close();
             }
         });
+    ui.data_mut(|d| d.insert_temp(filter_id, filter));
     combo
         .response
-        .widget_info(|| egui::WidgetInfo::labeled(egui::Role::ComboBox, true, "摘要方式"));
-    if chosen != current {
-        settings.summary_provider = chosen;
-        settings.summary_model = chosen.default_summary_model().into();
-        return true;
+        .widget_info(|| egui::WidgetInfo::labeled(egui::Role::ComboBox, true, "摘要模型"));
+    if !claude {
+        let url = openrouter::model_page_url(&settings.summary_model);
+        theme::link_button(ui, icon::OPEN, "在 OpenRouter 看費率", &url);
+        if let Some(m) = current {
+            ui.label(
+                RichText::new(m.price_label())
+                    .size(12.0)
+                    .color(if m.is_free() { p.success } else { p.warning }),
+            );
+        }
     }
-    false
+    match chosen {
+        Some((provider, model)) if provider != settings.summary_provider || model != settings.summary_model => {
+            settings.summary_provider = provider;
+            settings.summary_model = model;
+            true
+        }
+        _ => false,
+    }
 }
 
 /// 輸出選項（設定頁、新增轉錄、匯出頁共用）：格式、位置，以及檔名、內容、逐字稿樣式、同名檔案。

@@ -27,7 +27,7 @@
 <div class="diagram-container">
 <svg viewBox="0 0 1280 904" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="ms-flow-title ms-flow-desc">
 <title id="ms-flow-title">語音轉錄 處理流程圖</title>
-<desc id="ms-flow-desc">一場會議依序經過前處理、轉錄、說話者分配、摘要、匯出五個階段：前處理在本機轉檔切段（電腦用 ffmpeg，Android 用內建解碼與 MP3 編碼），轉錄用付費的 Nemotron 3.5 Transcribe，說話者與摘要用 Gemini 免費額度，摘要在電腦版也可手動改用 Claude Code CLI，每一步完成都存檔、可從斷點續跑。</desc>
+<desc id="ms-flow-desc">一場會議依序經過前處理、轉錄、說話者分配、摘要、匯出五個階段：前處理在本機轉檔切段（電腦用 ffmpeg，Android 用內建解碼與 MP3 編碼），轉錄用付費的 Nemotron 3.5 Transcribe，說話者用 Gemini 免費額度聽音訊分配，摘要用 OpenRouter 上選的模型（預設免費、可選付費），摘要在電腦版也可手動改用 Claude Code CLI，每一步完成都存檔、可從斷點續跑。</desc>
 <defs>
 <marker id="ms-flow-arr-proc" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#3949ab"/></marker>
 <marker id="ms-flow-arr-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#e27e00"/></marker>
@@ -54,8 +54,8 @@
 <line x1="160" y1="328" x2="160" y2="446" stroke="#3949ab" stroke-width="1.2" marker-end="url(#ms-flow-arr-proc)"/>
 <line x1="400" y1="328" x2="400" y2="446" stroke="#e27e00" stroke-width="1.6" marker-end="url(#ms-flow-arr-accent)"/>
 <line x1="640" y1="328" x2="640" y2="446" stroke="#3949ab" stroke-width="1.2" marker-end="url(#ms-flow-arr-proc)"/>
-<line x1="848" y1="328" x2="848" y2="446" stroke="#3949ab" stroke-width="1.2" marker-end="url(#ms-flow-arr-proc)"/>
-<path d="M 912,328 V 368 Q 912,376 920,376 H 1112 Q 1120,376 1120,384 V 446" fill="none" stroke="#3949ab" stroke-width="1.2" stroke-dasharray="5,4" marker-end="url(#ms-flow-arr-proc)"/>
+<line x1="880" y1="328" x2="880" y2="446" stroke="#3949ab" stroke-width="1.2" marker-end="url(#ms-flow-arr-proc)"/>
+<path d="M 944,328 V 368 Q 944,376 952,376 H 1112 Q 1120,376 1120,384 V 446" fill="none" stroke="#3949ab" stroke-width="1.2" stroke-dasharray="5,4" marker-end="url(#ms-flow-arr-proc)"/>
 
 <!-- 連線標籤（遮罩在線外，留 8px） -->
 <rect x="168" y="352" width="68" height="16" rx="2" fill="#f4f7fb"/>
@@ -64,10 +64,10 @@
 <text x="436" y="364" class="t-lbl" fill="#a65c00" text-anchor="middle">分段音訊</text>
 <rect x="648" y="352" width="80" height="16" rx="2" fill="#f4f7fb"/>
 <text x="688" y="364" class="t-lbl" fill="#3949ab" text-anchor="middle">音訊＋逐字稿</text>
-<rect x="800" y="352" width="40" height="16" rx="2" fill="#f4f7fb"/>
-<text x="820" y="364" class="t-lbl" fill="#3949ab" text-anchor="middle">預設</text>
-<rect x="976" y="352" width="80" height="16" rx="2" fill="#f4f7fb"/>
-<text x="1016" y="364" class="t-lbl" fill="#3949ab" text-anchor="middle">或手動切換</text>
+<rect x="888" y="352" width="40" height="16" rx="2" fill="#f4f7fb"/>
+<text x="908" y="364" class="t-lbl" fill="#3949ab" text-anchor="middle">預設</text>
+<rect x="1000" y="352" width="80" height="16" rx="2" fill="#f4f7fb"/>
+<text x="1040" y="364" class="t-lbl" fill="#3949ab" text-anchor="middle">或手動切換</text>
 
 <!-- 階段 01 前處理 -->
 <rect x="64" y="216" width="192" height="112" rx="6" fill="#f4f7fb"/>
@@ -132,14 +132,23 @@
 <text x="400" y="512" class="t-mono" fill="#44506b" text-anchor="middle">OpenRouter</text>
 <text x="400" y="532" class="t-sub" fill="#a65c00" text-anchor="middle">付費 ≈ US$0.12／小時</text>
 
-<!-- 模型：Gemini（AI，紫） -->
-<rect x="544" y="448" width="432" height="104" rx="6" fill="#f4f7fb"/>
-<rect x="544" y="448" width="432" height="104" rx="6" fill="#dcc4e8" stroke="#8e24aa" stroke-width="1.2"/>
+<!-- 模型：Gemini（AI，紫）：只負責聽音訊分配說話者 -->
+<rect x="544" y="448" width="192" height="104" rx="6" fill="#f4f7fb"/>
+<rect x="544" y="448" width="192" height="104" rx="6" fill="#dcc4e8" stroke="#8e24aa" stroke-width="1.2"/>
 <rect x="552" y="454" width="20" height="12" rx="2" fill="none" stroke="#8e24aa" stroke-opacity="0.6" stroke-width="0.8"/>
 <text x="562" y="463" class="t-tag" fill="#8b23a7" text-anchor="middle">AI</text>
-<text x="760" y="490" class="t-name" fill="#14213d" text-anchor="middle">Gemini Flash（免費額度）</text>
-<text x="760" y="512" class="t-mono" fill="#44506b" text-anchor="middle">Google AI Studio · 沒 Key 改用 OpenRouter :free</text>
-<text x="760" y="532" class="t-sub" fill="#44506b" text-anchor="middle">回傳「句號・說話者・秒數」；整合重複的人、推測姓名、寫摘要</text>
+<text x="640" y="490" class="t-name" fill="#14213d" text-anchor="middle">Gemini Flash</text>
+<text x="640" y="512" class="t-mono" fill="#44506b" text-anchor="middle">免費額度 · 沒 Key 改 :free</text>
+<text x="640" y="532" class="t-sub" fill="#44506b" text-anchor="middle">回傳「句號・說話者・秒數」</text>
+
+<!-- 模型：OpenRouter 摘要模型（AI，紫）：整合說話者、寫摘要；下拉選單選，預設免費（2026-10-31） -->
+<rect x="784" y="448" width="192" height="104" rx="6" fill="#f4f7fb"/>
+<rect x="784" y="448" width="192" height="104" rx="6" fill="#dcc4e8" stroke="#8e24aa" stroke-width="1.2"/>
+<rect x="792" y="454" width="20" height="12" rx="2" fill="none" stroke="#8e24aa" stroke-opacity="0.6" stroke-width="0.8"/>
+<text x="802" y="463" class="t-tag" fill="#8b23a7" text-anchor="middle">AI</text>
+<text x="880" y="490" class="t-name" fill="#14213d" text-anchor="middle">OpenRouter 模型</text>
+<text x="880" y="512" class="t-mono" fill="#44506b" text-anchor="middle">預設免費 · 可選付費</text>
+<text x="880" y="532" class="t-sub" fill="#44506b" text-anchor="middle">整合重複的人、寫摘要</text>
 
 <!-- 選項：Claude Code CLI（可選，黃虛線） -->
 <rect x="1024" y="448" width="192" height="104" rx="6" fill="#f4f7fb"/>

@@ -12,7 +12,7 @@ use meetscribe_core::config::{AppPaths, Settings};
 use meetscribe_core::export::{self, Content, ExportOptions};
 use meetscribe_core::gemini::Gemini;
 use meetscribe_core::model::{JobOptions, Project, ProjectStatus, Stage};
-use meetscribe_core::openrouter::OpenRouter;
+use meetscribe_core::openrouter::{self, OpenRouter};
 use meetscribe_core::pipeline::{Engine, Event, EventSink, LogLevel};
 use meetscribe_core::secrets::{self, ApiKeys, KeyKind};
 use meetscribe_core::store::ProjectStore;
@@ -488,6 +488,29 @@ impl Bridge {
                         None => Err("尚未設定 Google AI Studio API Key".into()),
                     };
                     sh.emit(models_event("google", r));
+                });
+                Ok(Value::Null)
+            }
+            // 摘要模型的下拉選單（2026-10-31 使用者：OpenRouter 下拉選單、一定標免費／付費、越推薦越上面、免費優先、可開官網看費率）。
+            // 結果是 summary_models 事件；排序與推薦名單在 core 的 openrouter::summary_models
+            "load_summary_models" => {
+                let sh = s.clone();
+                self.rt.spawn(async move {
+                    let r = match OpenRouter::new(&sh.settings(), "public".into()) {
+                        Ok(c) => c.list_models().await.map_err(|e| e.to_string()),
+                        Err(e) => Err(e.to_string()),
+                    };
+                    sh.emit(match r {
+                        Ok(list) => json!({
+                            "type": "summary_models", "ok": true,
+                            "models": openrouter::summary_models(&list).iter().map(|m| json!({
+                                "id": m.id, "name": m.name, "free": m.is_free(),
+                                "recommended": openrouter::recommend_rank(&m.id).is_some(),
+                                "price": m.price_label(), "url": m.page_url(),
+                            })).collect::<Vec<_>>(),
+                        }),
+                        Err(e) => json!({ "type": "summary_models", "ok": false, "error": e }),
+                    });
                 });
                 Ok(Value::Null)
             }

@@ -54,6 +54,7 @@ $src = "$PWD"; robocopy $src "Y:\5. NVIDIA Nemotron 3.5 Transcribe 逐字稿轉�
 1.3.0（傳到其他裝置＋API 金鑰自動同步，見〈傳到其他裝置〉）同日發佈給所有裝置：線上 update.json 的兩個雜湊與建置輸出相同，`update_check` 電腦從 1.2.0、手機從 1.2.1 都挑到它。
 1.3.1（電腦版設定的「儲存設定」固定在底部、舊會議匯出頁補勾 PDF：`ExportOptions.rev`＋`upgrade()` 在 `ProjectStore::load`）同日發佈給所有裝置，`update_check` 兩個平台從 1.3.0 都挑到它。
 1.3.2（手動同步會議內容：摘要頁「同步到其他裝置」、收件端自動套用＋還原上一版，見〈傳到其他裝置〉）同日發佈給所有裝置，`update_check` 兩個平台從 1.3.1 都挑到它。
+1.3.3（摘要改 OpenRouter 下拉選單、預設免費、標免費／付費與費率、可開官網，見〈使用者定的費用分工〉）同日發佈給所有裝置，`update_check` 兩個平台從 1.3.2 都挑到它。
 建 APK 時模擬器要先關（`adb emu kill`）：兩個一起開 Gradle daemon 會被系統砍掉（記憶體不夠）。
 建置時記憶體吃緊（可用虛擬記憶體不到 2 GB）連 `-j 1` 都會 OOM，請使用者先關程式，不要改 LTO 或另開 target 目錄硬編。
 快速開啟：專案根目錄的 `開啟 語音轉錄.cmd`（`%~dp0` 相對路徑，不寫死中文路徑）指向 `target\release\meetscribe-app.exe`。
@@ -89,9 +90,12 @@ PDF 是 `export/pdf.rs` 照 docx 模組的版面直接畫（krilla，手機沒�
 ## 使用者定的費用分工（2026-10-30）
 
 - 逐字稿：OpenRouter `nvidia/nemotron-3.5-transcribe`，**唯一付費**的部分。
-- 說話者分配、整合、摘要：**預設免費**——Google AI Studio Gemini 免費額度；沒 Google Key 時 `Engine::from_settings` 退到 OpenRouter 的 `:free` 模型並寫 notice。
-- 摘要可在 UI（新增轉錄表單、摘要頁）手動切成本機 Claude Code CLI。
-- 新增任何預設模型都要維持「只有逐字稿收費」。
+- 說話者分配：**預設免費**——Google AI Studio Gemini 免費額度聽音訊；沒 Google Key 時 `Engine::from_settings` 退到 OpenRouter 的 `:free` 模型並寫 notice。
+- 整合與摘要（2026-10-31 使用者：「摘要Gemini 模型預設拿掉 放上OPENROTUER 免費模型跟付費模型」）：OpenRouter，預設 `nvidia/nemotron-3-ultra-550b-a55b:free`；
+  下拉選單（`widgets::summary_model_picker`、手機 `SummaryModelPicker`）列 `openrouter::summary_models`：免費組在前、付費組在後，各組照 `RECOMMENDED_FREE`／`RECOMMENDED_PAID`
+  名次在前並標「推薦」，**一定標免費／付費**（付費附費率），旁邊「在 OpenRouter 看費率」開 `https://openrouter.ai/<模型 ID>`。推薦名單是 2026-10-31 依 OpenRouter 排行榜挑的，會過時：改之前重查。
+  設定 schema 4 把舊的 Gemini 摘要改過來；`sanitized` 也不准摘要用 Google。電腦版另可選本機 Claude Code CLI。
+- 新增任何預設模型都要維持「只有逐字稿收費」（付費模型只能是使用者自己在選單裡選的）。
 - 不做本機部署 Nemotron（vLLM 等）：使用者 GPU 記憶體不夠，逐字稿一律走雲端。
 
 ## 外部事實（會變，動相關程式前重查）

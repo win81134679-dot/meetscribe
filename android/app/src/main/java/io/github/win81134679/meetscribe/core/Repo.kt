@@ -50,6 +50,8 @@ object Repo {
     val keyTests = MutableStateFlow<Map<String, KeyTest>>(emptyMap())
     /** provider → 模型清單（或錯誤訊息，放在 Result 裡）。 */
     val models = MutableStateFlow<Map<String, Result<List<String>>>>(emptyMap())
+    /** 摘要模型的下拉選單（排好序：免費在前、各組推薦的在前）；null＝還沒載入。 */
+    val summaryModels = MutableStateFlow<Result<List<SummaryModel>>?>(null)
     /** 專案頁訂閱：某個專案有新內容。 */
     val projectUpdates = MutableSharedFlow<ProjectDetail>(extraBufferCapacity = 64)
     val toasts = MutableSharedFlow<Pair<Boolean, String>>(extraBufferCapacity = 16)
@@ -310,6 +312,10 @@ object Repo {
                 }
             }
             "key_test" -> keyTests.update { it + (e.getString("kind") to KeyTest(e.optBoolean("ok"), e.optString("text"))) }
+            "summary_models" -> summaryModels.value =
+                if (e.optBoolean("ok")) Result.success(e.optJSONArray("models").objects().map {
+                    SummaryModel(it.optString("id"), it.optString("name"), it.optBoolean("free"), it.optBoolean("recommended"), it.optString("price"), it.optString("url"))
+                }) else Result.failure(Exception(e.optString("error")))
             "models" -> models.update {
                 val r = if (e.optBoolean("ok")) Result.success(e.optJSONArray("models").strings())
                 else Result.failure(Exception(e.optString("error")))

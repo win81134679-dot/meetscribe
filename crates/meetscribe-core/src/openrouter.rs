@@ -58,6 +58,84 @@ impl ModelInfo {
     pub fn outputs_text(&self) -> bool {
         self.output_modalities.is_empty() || self.output_modalities.iter().any(|m| m == "text")
     }
+    fn accepts_text(&self) -> bool {
+        self.input_modalities.is_empty() || self.input_modalities.iter().any(|m| m == "text")
+    }
+    /// 不收費（`:free`，或輸入、輸出都是 0 元）。
+    pub fn is_free(&self) -> bool {
+        self.id.ends_with(":free") || (self.prompt_price == 0.0 && self.completion_price == 0.0)
+    }
+    /// 「免費」或「付費 · 輸入 $0.30／輸出 $1.20（每百萬 tokens）」（2026-10-31 使用者：「一定要標注免費/付費」）。
+    pub fn price_label(&self) -> String {
+        if self.is_free() {
+            return "免費".into();
+        }
+        let per_m = |p: f64| {
+            let v = p * 1_000_000.0;
+            if v >= 10.0 { format!("${v:.0}") } else if v >= 1.0 { format!("${v:.2}") } else { format!("${v:.3}") }
+        };
+        format!("付費 · 輸入 {}／輸出 {}（每百萬 tokens）", per_m(self.prompt_price), per_m(self.completion_price))
+    }
+    /// OpenRouter 官網上這個模型的頁面（看費率與說明）。
+    pub fn page_url(&self) -> String {
+        model_page_url(&self.id)
+    }
+}
+
+/// OpenRouter 官網上某個模型的頁面。
+pub fn model_page_url(id: &str) -> String {
+    format!("https://openrouter.ai/{}", id.trim())
+}
+
+/// 推薦寫摘要的免費模型，越前面越推薦（2026-10-31 依 OpenRouter 上的模型規模與用途挑；下架的自動略過）。
+pub const RECOMMENDED_FREE: &[&str] = &[
+    "nvidia/nemotron-3-ultra-550b-a55b:free",
+    "thinkingmachines/inkling:free",
+    "nvidia/nemotron-3.5-super-vl:free",
+    "google/gemma-4-31b-it:free",
+    "nvidia/nemotron-3.5-lightning:free",
+    "dots-studio/dots-3-note-preview:free",
+];
+
+/// 推薦寫摘要的付費模型，越前面越推薦（2026-10-31 依 OpenRouter 排行榜的 Artificial Analysis 智力指數挑，兼顧中文與價格；下架的自動略過）。
+/// 會變：改之前到 https://openrouter.ai/rankings 重查。
+pub const RECOMMENDED_PAID: &[&str] = &[
+    "anthropic/claude-sonnet-5.5",
+    "openai/gpt-6.1-terra",
+    "qwen/qwen3.8-max-prime",
+    "google/gemini-4-argon",
+    "moonshotai/kimi-k3.1-pro",
+    "anthropic/claude-haiku-5.5",
+    "google/gemini-3.8-flash",
+    "deepseek/deepseek-v4.1-flash",
+];
+
+/// 在推薦名單裡的名次（免費、付費各自排）。
+pub fn recommend_rank(id: &str) -> Option<usize> {
+    RECOMMENDED_FREE.iter().position(|r| *r == id).or_else(|| RECOMMENDED_PAID.iter().position(|r| *r == id))
+}
+
+/// 可以寫摘要的模型：吃文字、出文字、不是語音轉文字、價格有標（自動路由那種沒有固定價的不列）、不是批次版（`:batch` 不即時回）。
+/// 排序（2026-10-31 使用者：「越推薦的越上面 但免費的優先再付費的」）：免費組在前、付費組在後；
+/// 每組裡推薦名單照名次在前，其餘免費的依名稱、付費的照輸出價格由低到高。
+pub fn summary_models(list: &[ModelInfo]) -> Vec<ModelInfo> {
+    let mut out: Vec<ModelInfo> = list
+        .iter()
+        .filter(|m| m.accepts_text() && m.outputs_text() && !m.is_transcription())
+        .filter(|m| m.prompt_price >= 0.0 && m.completion_price >= 0.0)
+        .filter(|m| !m.output_modalities.iter().any(|o| o == "audio" || o == "image"))
+        .filter(|m| !m.id.ends_with(":batch"))
+        .cloned()
+        .collect();
+    out.sort_by(|a, b| {
+        let rank = |m: &ModelInfo| recommend_rank(&m.id).unwrap_or(usize::MAX);
+        b.is_free()
+            .cmp(&a.is_free())
+            .then(rank(a).cmp(&rank(b)))
+            .then(a.completion_price.total_cmp(&b.completion_price))
+            .then(a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+    });
+    out
 }
 
 #[derive(Clone, Debug, Default)]
@@ -385,6 +463,47 @@ fn parse_model(m: &Value) -> ModelInfo {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn summary_models_free_first_then_recommended_then_price() {
+        let m = |id: &str, p: f64, c: f64| super::ModelInfo {
+            id: id.into(),
+            name: id.into(),
+            context_length: 0,
+            prompt_price: p,
+            completion_price: c,
+            input_modalities: vec!["text".into()],
+            output_modalities: vec!["text".into()],
+        };
+        let mut stt = m("nvidia/nemotron-3.5-transcribe", 0.001, 0.0);
+        stt.output_modalities = vec!["transcription".into()];
+        let list = vec![
+            m("zzz/cheap", 0.0000001, 0.0000002),
+            m("anthropic/claude-haiku-5.5", 0.0000002, 0.0000005),
+            m("aaa/other:free", 0.0, 0.0),
+            m("anthropic/claude-sonnet-5.5", 0.000003, 0.00001),
+            m("anthropic/claude-sonnet-5.5:batch", 0.0000015, 0.000005),
+            m("openrouter/auto", -1.0, -1.0),
+            m("thinkingmachines/inkling:free", 0.0, 0.0),
+            m("nvidia/nemotron-3-ultra-550b-a55b:free", 0.0, 0.0),
+            stt,
+        ];
+        let ids: Vec<String> = super::summary_models(&list).into_iter().map(|m| m.id).collect();
+        assert_eq!(
+            ids,
+            [
+                "nvidia/nemotron-3-ultra-550b-a55b:free",
+                "thinkingmachines/inkling:free",
+                "aaa/other:free",
+                "anthropic/claude-sonnet-5.5",
+                "anthropic/claude-haiku-5.5",
+                "zzz/cheap",
+            ]
+        );
+        assert_eq!(list[2].price_label(), "免費");
+        assert_eq!(list[3].price_label(), "付費 · 輸入 $3.00／輸出 $10（每百萬 tokens）");
+        assert_eq!(list[3].page_url(), "https://openrouter.ai/anthropic/claude-sonnet-5.5");
+    }
+
     use super::*;
 
     #[test]

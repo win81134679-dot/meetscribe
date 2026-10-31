@@ -105,7 +105,8 @@ pub struct Settings {
 /// 2：匯出預設改成「每場會議一個子資料夾」（2026-10-31 使用者：「會議預設開啟每場會議子資料夾」），
 /// 舊設定檔（存的是當時的預設 false）載入時改開一次，之後使用者自己關掉就尊重。
 /// 3：新增 PDF 格式且預設勾（2026-10-31 使用者：「輸出檔案也加入PDF並預設勾選」），舊設定檔補勾一次。
-pub const SETTINGS_SCHEMA: u32 = 3;
+/// 4：摘要不再預設用 Gemini，改 OpenRouter 免費模型（2026-10-31 使用者：「摘要Gemini 模型預設拿掉 放上OPENROTUER 免費模型跟付費模型」），用 Gemini 寫摘要的舊設定改過去。
+pub const SETTINGS_SCHEMA: u32 = 4;
 
 /// 正式的中轉站（`relay/deploy.ps1` 部署在使用者自己的 Cloudflare 帳號，2026-10-31）。空白＝還沒部署，「傳到其他裝置」顯示未啟用。
 pub const DEFAULT_RELAY_URL: &str = "https://meetscribe-relay.win8-1134679.workers.dev";
@@ -131,8 +132,8 @@ impl Default for Settings {
             stt_model: DEFAULT_STT_MODEL.into(),
             attribution_provider: LlmProvider::Google,
             attribution_model: DEFAULT_ATTRIBUTION_MODEL_GOOGLE.into(),
-            summary_provider: LlmProvider::Google,
-            summary_model: DEFAULT_SUMMARY_MODEL_GOOGLE.into(),
+            summary_provider: LlmProvider::OpenRouter,
+            summary_model: DEFAULT_SUMMARY_MODEL_OPENROUTER.into(),
             claude_cli_path: String::new(),
             output_language: "zh-TW".into(),
             chunk_minutes: 10,
@@ -172,6 +173,11 @@ impl Settings {
         }
         if self.attribution_model.trim().is_empty() {
             self.attribution_model = self.attribution_provider.default_attribution_model().into();
+        }
+        // 摘要不用 Gemini（只剩說話者辨識用它聽音訊）
+        if self.summary_provider == LlmProvider::Google {
+            self.summary_provider = LlmProvider::OpenRouter;
+            self.summary_model = DEFAULT_SUMMARY_MODEL_OPENROUTER.into();
         }
         if self.summary_model.trim().is_empty() {
             self.summary_model = self.summary_provider.default_summary_model().into();
@@ -220,6 +226,10 @@ impl Settings {
         }
         if self.schema < 3 && !self.export.formats.iter().any(|f| f == "pdf") {
             self.export.formats.push("pdf".into());
+        }
+        if self.schema < 4 && self.summary_provider == LlmProvider::Google {
+            self.summary_provider = LlmProvider::OpenRouter;
+            self.summary_model = DEFAULT_SUMMARY_MODEL_OPENROUTER.into();
         }
         self.schema = SETTINGS_SCHEMA;
         true
@@ -360,4 +370,26 @@ mod tests {
         s.save(&paths).unwrap();
         assert_eq!(Settings::load(&paths).summary_model, "x/y");
     }
+
+    /// 舊設定用 Gemini 寫摘要：升到 schema 4 時改成 OpenRouter 免費模型；說話者辨識維持 Gemini。
+    #[test]
+    fn schema4_moves_summary_off_gemini() {
+        let mut s = Settings {
+            schema: 3,
+            summary_provider: LlmProvider::Google,
+            summary_model: DEFAULT_SUMMARY_MODEL_GOOGLE.into(),
+            ..Settings::default()
+        };
+        s.attribution_provider = LlmProvider::Google;
+        assert!(s.migrate());
+        assert_eq!(s.summary_provider, LlmProvider::OpenRouter);
+        assert_eq!(s.summary_model, DEFAULT_SUMMARY_MODEL_OPENROUTER);
+        assert_eq!(s.attribution_provider, LlmProvider::Google);
+        // 已經選了付費模型的不動
+        let mut paid = Settings { schema: 3, summary_provider: LlmProvider::OpenRouter, summary_model: "anthropic/claude-sonnet-5.5".into(), ..Settings::default() };
+        paid.migrate();
+        assert_eq!(paid.summary_model, "anthropic/claude-sonnet-5.5");
+        assert_eq!(Settings::default().summary_provider, LlmProvider::OpenRouter);
+    }
+
 }

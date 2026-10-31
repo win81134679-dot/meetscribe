@@ -77,10 +77,9 @@ enum Command {
 
 fn summary_provider(name: &str) -> Result<LlmProvider> {
     Ok(match name {
-        "free" | "google" | "gemini" => LlmProvider::Google,
+        "free" | "openrouter" => LlmProvider::OpenRouter,
         "claude" | "claude-code" => LlmProvider::ClaudeCode,
-        "openrouter" => LlmProvider::OpenRouter,
-        other => bail!("不認得的摘要方式：{other}（free／claude／openrouter）"),
+        other => bail!("不認得的摘要方式：{other}（free／claude）"),
     })
 }
 

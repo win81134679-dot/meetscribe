@@ -63,6 +63,8 @@ pub struct MeetApp {
     pub has_google_key: bool,
     pub update: UpdateStatus,
     pub device_id: String,
+    /// OpenRouter 的模型清單（摘要模型下拉選單用；啟動時載入）。
+    pub or_models: Option<Result<Vec<meetscribe_core::openrouter::ModelInfo>, String>>,
     /// 傳到其他裝置（2026-10-31）。
     pub transfer: TransferUi,
     /// 已經叫安裝程式起來了（關閉時不要再叫一次）。
@@ -94,6 +96,8 @@ impl MeetApp {
             // 新增轉錄頁的帳戶列要顯示餘額
             worker.send(Cmd::TestKey(KeyKind::OpenRouter));
         }
+        // 摘要模型的下拉選單要列 OpenRouter 的模型（不需要金鑰）
+        worker.send(Cmd::LoadOpenRouterModels);
         let device_id = meetscribe_core::update::device_id(&paths.root);
         let mut update_state = meetscribe_core::update::UpdateState::load(&paths.root);
         let updated_from = update_state.note_version(crate::worker::VERSION);
@@ -125,6 +129,7 @@ impl MeetApp {
             has_google_key,
             update: UpdateStatus::Idle,
             device_id,
+            or_models: None,
             transfer: TransferUi::default(),
             installing: false,
             attention: false,
@@ -295,7 +300,12 @@ impl MeetApp {
                 Msg::Busy(ids) => self.busy = ids.into_iter().collect(),
                 Msg::SttCaps(c) => self.stt_caps = Some(c),
                 Msg::KeyTest { kind, result } => self.settings_form.key_test_result(kind, result),
-                Msg::OpenRouterModels(r) => self.settings_form.openrouter_models(r),
+                Msg::OpenRouterModels(r) => {
+                    if r.is_ok() || self.or_models.is_none() {
+                        self.or_models = Some(r.clone());
+                    }
+                    self.settings_form.openrouter_models(r)
+                }
                 Msg::GoogleModels(r) => self.settings_form.google_models(r),
                 Msg::Durations(d) => self.new_job.durations(d),
                 Msg::Ffmpeg(r) => self.settings_form.ffmpeg_result(r),

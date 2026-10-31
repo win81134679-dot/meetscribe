@@ -7,10 +7,12 @@
 |---|---|---|
 | 逐字稿 | OpenRouter 上的 NVIDIA **Nemotron 3.5 Transcribe** | 付費，約 US$0.12／小時音訊 |
 | 誰在說話 | Google AI Studio 的 **Gemini Flash 免費額度**（聽音訊判斷） | 免費 |
-| 會議摘要 | 同上，Gemini 免費額度 | 免費 |
+| 會議摘要 | OpenRouter 上的 **NVIDIA Nemotron 3 Ultra（免費版）**，可在下拉選單改選其他免費或付費模型 | 預設免費 |
 | 摘要（可選） | 你電腦上的 **Claude Code CLI**（`claude -p`，用你的 Claude 訂閱） | — |
 
-沒設定 Google Key 時，說話者與摘要會自動改用 OpenRouter 上的免費模型（`nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free`、`nvidia/nemotron-3-ultra-550b-a55b:free`），一樣不花錢。
+摘要模型（1.3.3 起）在「設定 → 模型」、新增轉錄與會議的摘要頁用下拉選單選：免費的排前面、付費的在後，各組推薦的在最上面，每個都標「免費／付費」與費率，
+旁邊「在 OpenRouter 看費率」直接開該模型的官網頁。選付費模型會從你的 OpenRouter 餘額扣款。
+沒設定 Google Key 時，說話者辨識會自動改用 OpenRouter 上的免費模型（`nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free`），一樣不花錢。
 
 ## 架構一覽
 
@@ -209,7 +211,7 @@ meetscribe-cli export 1a2b3c4d --formats docx --out D:\會議記錄
 
 ## 隱私
 
-- 錄音會上傳到 OpenRouter（及其供應商 DeepInfra）轉錄；說話者與摘要會送到 Google 或 OpenRouter 的免費模型。
+- 錄音會上傳到 OpenRouter（及其供應商 DeepInfra）轉錄；說話者辨識會送到 Google（或 OpenRouter 的免費模型），摘要送到你選的 OpenRouter 模型。
 - 「傳到其他裝置」經過的中轉站只看得到加密過的內容，收完就刪（見上面〈傳到其他裝置〉）。
 - **Google 免費方案的輸入可能被 Google 用來改善產品**，免費模型供應商也可能記錄內容。機密會議請：摘要改用本機 Claude Code CLI、在設定勾選「OpenRouter 只路由到不保留資料的供應商」，或改用付費方案。
 

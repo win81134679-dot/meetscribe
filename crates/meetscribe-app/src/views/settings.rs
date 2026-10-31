@@ -176,8 +176,8 @@ pub fn show(app: &mut MeetApp, ui: &mut Ui) {
             });
         });
 
-        theme::section(ui, "Google AI Studio API Key　說話者與摘要（免費）", |ui| {
-            theme::hint(ui, "說話者辨識與會議摘要預設用 Gemini 免費額度；額度用完會自動重試或改天繼續。沒設定時改用 OpenRouter 上的免費模型。");
+        theme::section(ui, "Google AI Studio API Key　說話者辨識（免費）", |ui| {
+            theme::hint(ui, "說話者辨識用 Gemini 免費額度聽音訊分辨誰在說話；額度用完會自動重試或改天繼續。沒設定時改用 OpenRouter 上的免費模型。摘要另外在下面「模型」選。");
             keys_changed |= key_box(ui, &app.worker, KeyKind::Google, &mut f.g_key, &mut f.g_status);
             theme::link_button(ui, icon::KEY, "到 Google AI Studio 免費取得金鑰", theme::links::GOOGLE_AI_STUDIO_KEYS);
             ui.add_space(4.0);
@@ -206,12 +206,10 @@ pub fn show(app: &mut MeetApp, ui: &mut Ui) {
             theme::hint(ui, "Gemini 模型名稱不存在時，程式會自動改用目前最新的 Flash。");
             ui.add_space(8.0);
 
-            theme::label(ui, "摘要");
-            if provider_row(ui, &mut d.summary_provider, &[LlmProvider::Google, LlmProvider::OpenRouter, LlmProvider::ClaudeCode]) {
-                d.summary_model = d.summary_provider.default_summary_model().into();
-            }
-            let r = ui.add(egui::TextEdit::singleline(&mut d.summary_model).desired_width(380.0));
-            r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::TextInput, true, "摘要模型"));
+            theme::label(ui, "說話者整合與摘要");
+            ui.horizontal_wrapped(|ui| {
+                crate::widgets::summary_model_picker(ui, d, app.or_models.as_ref(), "settings_summary_model");
+            });
             match d.summary_provider {
                 LlmProvider::ClaudeCode => {
                     theme::hint(ui, "填 sonnet、opus、haiku 或完整模型 ID；用你電腦上已登入的 Claude Code。");
@@ -220,8 +218,7 @@ pub fn show(app: &mut MeetApp, ui: &mut Ui) {
                         None => ui.label(RichText::new("找不到 claude；請安裝 Claude Code 或在「進階」指定路徑").size(12.5).color(p.danger)),
                     };
                 }
-                LlmProvider::Google => theme::hint(ui, "預設：Gemini 免費額度（沒 Google Key 時自動用 OpenRouter 免費模型）。"),
-                LlmProvider::OpenRouter => theme::hint(ui, "OpenRouter 模型 ID；名稱結尾是 :free 的不收費。"),
+                _ => theme::hint(ui, "用你的 OpenRouter 金鑰。預設是免費模型；選付費模型會從 OpenRouter 餘額扣款，費率看「在 OpenRouter 看費率」。"),
             }
             ui.add_space(8.0);
 
@@ -306,10 +303,6 @@ pub fn show(app: &mut MeetApp, ui: &mut Ui) {
                                         if ui.small_button("用於說話者").clicked() {
                                             f.draft.attribution_provider = LlmProvider::Google;
                                             f.draft.attribution_model = m.clone();
-                                        }
-                                        if ui.small_button("用於摘要").clicked() {
-                                            f.draft.summary_provider = LlmProvider::Google;
-                                            f.draft.summary_model = m.clone();
                                         }
                                     });
                                 }

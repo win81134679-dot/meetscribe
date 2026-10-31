@@ -3,6 +3,7 @@
 use crate::app::{MeetApp, View};
 use crate::views::project::Tab;
 use egui_kittest::Harness;
+use egui_kittest::kittest::Queryable;
 use meetscribe_core::config::AppPaths;
 use meetscribe_core::model::{JobOptions, Project, ProjectStatus, Segment, Stage, Summary, Timing};
 use meetscribe_core::store::ProjectStore;
@@ -234,4 +235,32 @@ fn render_screens() {
         st.project_ui.tab = Tab::Summary;
     }
     shot(&mut harness, "18_summary_sync");
+
+    // 摘要模型下拉選單：免費組在前、各組推薦的在前，標免費／付費與費率
+    let m = |id: &str, name: &str, p: f64, c: f64| meetscribe_core::openrouter::ModelInfo {
+        id: id.into(),
+        name: name.into(),
+        context_length: 0,
+        prompt_price: p,
+        completion_price: c,
+        input_modalities: vec!["text".into()],
+        output_modalities: vec!["text".into()],
+    };
+    {
+        let st = harness.state_mut();
+        st.or_models = Some(Ok(vec![
+            m("anthropic/claude-sonnet-5.5", "Anthropic: Claude Sonnet 5.5", 0.000003, 0.00001),
+            m("deepseek/deepseek-v4.1-flash", "DeepSeek: V4.1 Flash", 0.0000001, 0.0000005),
+            m("nvidia/nemotron-3-ultra-550b-a55b:free", "NVIDIA: Nemotron 3 Ultra (free)", 0.0, 0.0),
+            m("google/gemma-4-31b-it:free", "Google: Gemma 4 31B (free)", 0.0, 0.0),
+            m("some/other:free", "Other Model (free)", 0.0, 0.0),
+            m("zzz/cheap", "Cheap Model", 0.00000005, 0.0000001),
+        ]));
+        st.view = View::Settings;
+        st.settings_form = crate::views::settings::SettingsForm::new(&st.settings);
+    }
+    harness.set_size(egui::vec2(1280.0, 1300.0));
+    harness.run_steps(4);
+    harness.get_by_label("摘要模型").click();
+    shot(&mut harness, "19_summary_models");
 }

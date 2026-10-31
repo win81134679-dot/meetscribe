@@ -184,21 +184,14 @@ impl Engine {
                 openrouter.clone()
             }
         };
-        let text_llm: Arc<dyn LlmClient> = match (settings.summary_provider, &google) {
-            (LlmProvider::Google, Some(g)) => {
-                google_model(&mut settings.summary_model, "摘要", &mut notices);
-                g.clone()
-            }
-            (LlmProvider::Google, None) => {
+        // 摘要（與說話者整合）一律走 OpenRouter 選的模型或本機 Claude Code；Gemini 只剩說話者辨識（2026-10-31）
+        let text_llm: Arc<dyn LlmClient> = match settings.summary_provider {
+            LlmProvider::Google => {
                 settings.summary_model = LlmProvider::OpenRouter.default_summary_model().into();
-                notices.push(format!(
-                    "尚未設定 Google AI Studio Key，摘要改用 OpenRouter 免費模型 {}",
-                    settings.summary_model
-                ));
                 openrouter.clone()
             }
-            (LlmProvider::OpenRouter, _) => openrouter.clone(),
-            (LlmProvider::ClaudeCode, _) => match ClaudeCodeCli::new(&settings, paths.claude_workdir()) {
+            LlmProvider::OpenRouter => openrouter.clone(),
+            LlmProvider::ClaudeCode => match ClaudeCodeCli::new(&settings, paths.claude_workdir()) {
                 Ok(c) => Arc::new(c),
                 Err(e) => {
                     settings.summary_model = LlmProvider::OpenRouter.default_summary_model().into();

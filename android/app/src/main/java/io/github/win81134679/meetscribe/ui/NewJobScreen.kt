@@ -324,7 +324,7 @@ private fun AccountRow() {
         )
         if (google == null) {
             Text(
-                "尚未設定 Google AI Studio Key：說話者與摘要會改用 OpenRouter 的免費模型。",
+                "尚未設定 Google AI Studio Key：說話者辨識會改用 OpenRouter 的免費模型。",
                 color = Pal.current.textMuted, style = MaterialTheme.typography.bodySmall,
             )
         }
