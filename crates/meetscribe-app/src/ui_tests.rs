@@ -263,4 +263,33 @@ fn render_screens() {
     harness.run_steps(4);
     harness.get_by_label("摘要模型").click();
     shot(&mut harness, "19_summary_models");
+
+    // 逐字稿：點一下從那句播放（不進入修改）、雙擊才修改
+    harness.key_press(egui::Key::Escape);
+    {
+        let st = harness.state_mut();
+        st.view = View::Project;
+        st.selected = Some(id);
+        st.project_ui.tab = Tab::Transcript;
+    }
+    harness.set_size(egui::vec2(1280.0, 820.0));
+    harness.run_steps(4);
+    let line = "那壓力測試什麼時候做？";
+    harness.get_by_label(line).click();
+    harness.run_steps(2);
+    assert_eq!(harness.state().project_ui.editing(), None, "點一下不進入修改");
+    // 雙擊：直接送兩次滑鼠按下／放開（kittest 的 click() 走無障礙動作，不會被判定成雙擊）
+    let pos = harness.get_by_label(line).rect().center();
+    for pressed in [true, false, true, false] {
+        harness.input_mut().events.push(egui::Event::PointerMoved(pos));
+        harness.input_mut().events.push(egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        });
+    }
+    harness.run_steps(2);
+    assert_eq!(harness.state().project_ui.editing(), Some(3), "雙擊進入修改");
+    shot(&mut harness, "20_transcript_double_click_edit");
 }

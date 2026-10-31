@@ -3,6 +3,7 @@ package io.github.win81134679.meetscribe.ui
 import android.media.MediaPlayer
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.layout.Arrangement
@@ -338,6 +339,13 @@ private fun TranscriptTab(p: ProjectDetail, busy: Boolean, player: Player) {
         if (player.mp != null) {
             PlayerBar(player, Modifier.padding(horizontal = 12.dp, vertical = 4.dp))
         }
+        if (p.segments.isNotEmpty()) {
+            Text(
+                if (busy) "點一下句子從那裡播放（處理完成後可以長按修改）" else "點一下句子從那裡播放，長按修改",
+                color = pal.textMuted, style = MaterialTheme.typography.bodySmall,
+                modifier = Modifier.padding(horizontal = 16.dp),
+            )
+        }
         if (p.segments.isEmpty()) {
             Box(Modifier.fillMaxSize().padding(24.dp), contentAlignment = Alignment.Center) {
                 Text(if (busy) "逐字稿處理中，完成一段就會出現在這裡。" else "沒有逐字稿。", color = pal.textMuted)
@@ -366,7 +374,15 @@ private fun TranscriptTab(p: ProjectDetail, busy: Boolean, player: Player) {
                         .fillMaxWidth()
                         .clip(RoundedCornerShape(10.dp))
                         .background(if (seg.id == currentId) pal.accentFaint else pal.page)
-                        .clickable(enabled = !busy) { editing = seg }
+                        // 點一下從這句播放、長按修改（2026-10-31 使用者：「點擊一下跳到該錄音時間段長按可修改」）
+                        .combinedClickable(
+                            onClickLabel = "從這句播放",
+                            onLongClickLabel = "修改這句",
+                            onLongClick = { if (!busy) editing = seg },
+                        ) {
+                            if (player.mp != null) player.playFrom(seg.start)
+                            else Repo.toasts.tryEmit(true to "這場會議沒有可以播放的錄音")
+                        }
                         .padding(8.dp),
                 ) {
                     Row(verticalAlignment = Alignment.CenterVertically) {

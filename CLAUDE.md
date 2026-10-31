@@ -55,6 +55,8 @@ $src = "$PWD"; robocopy $src "Y:\5. NVIDIA Nemotron 3.5 Transcribe 逐字稿轉�
 1.3.1（電腦版設定的「儲存設定」固定在底部、舊會議匯出頁補勾 PDF：`ExportOptions.rev`＋`upgrade()` 在 `ProjectStore::load`）同日發佈給所有裝置，`update_check` 兩個平台從 1.3.0 都挑到它。
 1.3.2（手動同步會議內容：摘要頁「同步到其他裝置」、收件端自動套用＋還原上一版，見〈傳到其他裝置〉）同日發佈給所有裝置，`update_check` 兩個平台從 1.3.1 都挑到它。
 1.3.3（摘要改 OpenRouter 下拉選單、預設免費、標免費／付費與費率、可開官網，見〈使用者定的費用分工〉）同日發佈給所有裝置，`update_check` 兩個平台從 1.3.2 都挑到它。
+1.3.4（逐字稿點一下從那句播放：電腦雙擊修改、手機長按修改）同日發佈給所有裝置，`update_check` 兩個平台從 1.3.3 都挑到它。
+egui 離屏測試要驗雙擊時，直接往 `harness.input_mut().events` 送兩次 PointerButton 按下／放開；kittest 的 `click()` 走無障礙動作，永遠不會被判定成雙擊。
 建 APK 時模擬器要先關（`adb emu kill`）：兩個一起開 Gradle daemon 會被系統砍掉（記憶體不夠）。
 建置時記憶體吃緊（可用虛擬記憶體不到 2 GB）連 `-j 1` 都會 OOM，請使用者先關程式，不要改 LTO 或另開 target 目錄硬編。
 快速開啟：專案根目錄的 `開啟 語音轉錄.cmd`（`%~dp0` 相對路徑，不寫死中文路徑）指向 `target\release\meetscribe-app.exe`。

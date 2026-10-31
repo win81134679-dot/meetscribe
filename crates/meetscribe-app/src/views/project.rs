@@ -49,6 +49,12 @@ pub struct ProjectUi {
 }
 
 impl ProjectUi {
+    /// 正在修改的那一句（測試用）。
+    #[cfg(test)]
+    pub fn editing(&self) -> Option<u64> {
+        self.editing
+    }
+
     pub fn reset(&mut self) {
         let follow = self.follow_playback;
         *self = Self {
@@ -579,7 +585,7 @@ fn transcript_tab(
         });
         theme::hint(
             ui,
-            "點時間從那裡播放；點說話者可改成別人；點文字可修改、併入上一句或刪除。修改會自動存檔。",
+            "點一下句子從那裡播放，雙擊修改（也能併入上一句或刪除）；點說話者可改成別人。修改會自動存檔。",
         );
     });
 
@@ -717,10 +723,21 @@ fn transcript_tab(
                                 if seg.edited {
                                     text = text.italics();
                                 }
-                                let r = ui.add(egui::Label::new(text).wrap().sense(egui::Sense::click()));
-                                if r.clicked() && editable {
+                                // 點一下從這句播放、雙擊修改（2026-10-31 使用者：「電腦版點一下也是跳到該時間段雙擊允許修改」）
+                                let r = ui
+                                    .add(egui::Label::new(text).wrap().sense(egui::Sense::click()))
+                                    .on_hover_cursor(egui::CursorIcon::PointingHand)
+                                    .on_hover_text(if editable { "點一下從這句播放；雙擊修改" } else { "點一下從這句播放" });
+                                if r.double_clicked() && editable {
                                     st.editing = Some(seg.id);
                                     st.edit_text = seg.text.clone();
+                                } else if r.clicked()
+                                    && let Some(a) = &audio
+                                {
+                                    actions.push(Action::Play {
+                                        file: a.clone(),
+                                        secs: (seg.start - 0.3).max(0.0),
+                                    });
                                 }
                             }
                         });
