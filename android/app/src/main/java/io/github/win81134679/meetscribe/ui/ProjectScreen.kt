@@ -87,6 +87,7 @@ fun ProjectScreen(id: String, onBack: () -> Unit) {
     var menu by remember { mutableStateOf(false) }
     var renaming by remember { mutableStateOf(false) }
     var confirmDelete by remember { mutableStateOf(false) }
+    var sending by remember { mutableStateOf(false) }
     val ctx = LocalContext.current
 
     LaunchedEffect(id) {
@@ -116,6 +117,11 @@ fun ProjectScreen(id: String, onBack: () -> Unit) {
                             text = { Text("重新辨識說話者") },
                             enabled = !busy && (p?.chunksTotal ?: 0) > 0,
                             onClick = { menu = false; scope.launch { Repo.tryCall("reidentify", "id" to id) } },
+                        )
+                        DropdownMenuItem(
+                            text = { Text("傳到其他裝置") },
+                            enabled = p != null && !busy,
+                            onClick = { menu = false; sending = true },
                         )
                         DropdownMenuItem(
                             text = { Text("分享錄音檔") },
@@ -166,6 +172,9 @@ fun ProjectScreen(id: String, onBack: () -> Unit) {
             renaming = false
             scope.launch { Repo.edit("rename_project", "id" to id, "title" to t) }
         }
+    }
+    if (sending && p != null) {
+        SendToDeviceDialog("meeting", p!!.summary.title, id = id) { sending = false }
     }
     if (confirmDelete && p != null) {
         DeleteMeetingDialog(p!!, onDismiss = { confirmDelete = false }) {
@@ -539,6 +548,7 @@ private fun ExportTab(p: ProjectDetail) {
     var files by remember(p.id) { mutableStateOf(p.exported.map(::File).filter { it.isFile }) }
     var working by remember { mutableStateOf(false) }
     var fresh by remember(p.id) { mutableStateOf(false) }
+    var sendFile by remember { mutableStateOf<File?>(null) }
     val formats = opts.optJSONArray("formats").strings().toSet()
 
     fun update(f: JSONObject.() -> Unit) {
@@ -609,7 +619,7 @@ private fun ExportTab(p: ProjectDetail) {
             }
         }
         if (listed.isNotEmpty()) {
-            SectionCard("匯出的檔案", "用「分享」存到雲端硬碟、傳 LINE 或寄信。") {
+            SectionCard("匯出的檔案", "用「分享」存到雲端硬碟、傳 LINE 或寄信；➤ 傳到自己的其他裝置。") {
                 for (f in listed) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Text(f.name, Modifier.weight(1f), maxLines = 2, overflow = TextOverflow.Ellipsis)
@@ -617,6 +627,7 @@ private fun ExportTab(p: ProjectDetail) {
                             if (!Files.open(ctx, f)) scope.launch { Repo.toasts.emit(true to "手機上沒有能開 .${f.extension} 的 App") }
                         }) { Icon(Ic.OpenIn, contentDescription = "開啟", Modifier.size(20.dp)) }
                         IconButton(onClick = { Files.share(ctx, listOf(f)) }) { Icon(Ic.Share, contentDescription = "分享", Modifier.size(20.dp)) }
+                        IconButton(onClick = { sendFile = f }) { Icon(Ic.Send, contentDescription = "傳到其他裝置", Modifier.size(20.dp)) }
                     }
                 }
             }
@@ -635,6 +646,7 @@ private fun ExportTab(p: ProjectDetail) {
             }
         }
     }
+    sendFile?.let { f -> SendToDeviceDialog("file", f.name, path = f.absolutePath) { sendFile = null } }
 }
 
 @Composable

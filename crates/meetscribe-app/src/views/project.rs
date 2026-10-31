@@ -3,7 +3,7 @@
 use crate::app::MeetApp;
 use crate::theme::{self, icon, pal};
 use crate::widgets::{self, speaker_chip, speaker_color};
-use crate::worker::Cmd;
+use crate::worker::{Cmd, SendWhat};
 use egui::{Margin, RichText, Stroke, Ui};
 use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
 use meetscribe_core::config::Settings;
@@ -70,6 +70,8 @@ enum Action {
     Toast(String, bool),
     Export,
     Settings(Box<Settings>),
+    /// 傳到其他裝置：整場會議（None）或一個匯出檔。
+    SendToDevice(Option<PathBuf>),
 }
 
 pub fn show(app: &mut MeetApp, ui: &mut Ui, id: Uuid) {
@@ -205,6 +207,19 @@ fn apply(app: &mut MeetApp, id: Uuid, actions: Vec<Action>) {
             Action::Toast(t, e) => app.toast(t, e),
             Action::Export => export_now(app, id),
             Action::Settings(s) => app.apply_settings(*s),
+            Action::SendToDevice(file) => {
+                app.save_now();
+                match file {
+                    Some(f) => {
+                        let title = f.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                        app.transfer.open_send(SendWhat::File(f), title);
+                    }
+                    None => {
+                        let title = app.project(id).map(|p| p.title.clone()).unwrap_or_default();
+                        app.transfer.open_send(SendWhat::Meeting(id), title);
+                    }
+                }
+            }
         }
     }
 }
@@ -250,6 +265,13 @@ fn header(ui: &mut Ui, p: &mut Project, st: &mut ProjectUi, busy: bool, actions:
             } else if p.status.is_resumable() && theme::primary(ui, Some(icon::PLAY), "從中斷處繼續", true).clicked()
             {
                 actions.push(Action::Resume);
+            }
+            if !busy
+                && theme::button(ui, Some(icon::SEND), "傳到其他裝置")
+                    .on_hover_text("整場會議（逐字稿、摘要、錄音）加密後傳到你自己的電腦或手機")
+                    .clicked()
+            {
+                actions.push(Action::SendToDevice(None));
             }
             if theme::button(ui, Some(icon::FOLDER), "原始檔位置").clicked()
                 && let Some(dir) = p.source_file.parent()
@@ -894,12 +916,12 @@ fn export_tab(ui: &mut Ui, p: &Project, st: &mut ProjectUi, settings: &Settings,
         };
         if !files.is_empty() {
             ui.add_space(10.0);
-            exported_list(ui, title, files);
+            exported_list(ui, title, files, actions);
         }
     });
 }
 
-fn exported_list(ui: &mut Ui, title: &str, files: &[PathBuf]) {
+fn exported_list(ui: &mut Ui, title: &str, files: &[PathBuf], actions: &mut Vec<Action>) {
     let pl = pal(ui);
     theme::section(ui, title, |ui| {
         for f in files {
@@ -907,6 +929,12 @@ fn exported_list(ui: &mut Ui, title: &str, files: &[PathBuf]) {
                 ui.label(theme::ic(icon::CHECK, 13.0).color(pl.success));
                 ui.label(f.display().to_string());
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if theme::ghost(ui, Some(icon::SEND), "", Some(pl.accent_strong))
+                        .on_hover_text("傳到其他裝置")
+                        .clicked()
+                    {
+                        actions.push(Action::SendToDevice(Some(f.clone())));
+                    }
                     if theme::ghost(ui, Some(icon::OPEN), "開啟", Some(pl.accent_strong)).clicked() {
                         let _ = open::that(f);
                     }

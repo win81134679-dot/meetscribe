@@ -93,6 +93,10 @@ pub struct Settings {
     pub auto_update: bool,
     /// 檢查新版的 GitHub API 位址；空白＝api.github.com（測試接模擬伺服器用，介面上沒有）。
     pub update_api: String,
+    /// 「傳到其他裝置」的中轉站（`relay/`，Cloudflare Workers）；空白＝[`DEFAULT_RELAY_URL`]。測試接本機 `wrangler dev` 用。
+    pub relay_url: String,
+    /// 這台裝置在配對清單上的名稱（「辦公室電腦」「我的手機」）；空白＝電腦名稱或手機型號（由介面決定）。
+    pub device_name: String,
     /// 設定檔格式版本，見 [`SETTINGS_SCHEMA`]。舊檔沒有這欄＝0。
     #[serde(default)]
     pub schema: u32,
@@ -102,6 +106,22 @@ pub struct Settings {
 /// 舊設定檔（存的是當時的預設 false）載入時改開一次，之後使用者自己關掉就尊重。
 /// 3：新增 PDF 格式且預設勾（2026-10-31 使用者：「輸出檔案也加入PDF並預設勾選」），舊設定檔補勾一次。
 pub const SETTINGS_SCHEMA: u32 = 3;
+
+/// 正式的中轉站（`relay/deploy.ps1` 部署在使用者自己的 Cloudflare 帳號，2026-10-31）。空白＝還沒部署，「傳到其他裝置」顯示未啟用。
+pub const DEFAULT_RELAY_URL: &str = "https://meetscribe-relay.win8-1134679.workers.dev";
+/// `relay_url` 設成這個＝關閉「傳到其他裝置」。
+pub const RELAY_OFF: &str = "off";
+
+impl Settings {
+    /// 實際用的中轉站網址；空字串＝不用（`relay_url` 設成 [`RELAY_OFF`]，測試也用這個，才不會連到正式的中轉站）。
+    pub fn relay(&self) -> &str {
+        match self.relay_url.trim() {
+            "" => DEFAULT_RELAY_URL,
+            RELAY_OFF => "",
+            u => u,
+        }
+    }
+}
 
 impl Default for Settings {
     fn default() -> Self {
@@ -127,6 +147,8 @@ impl Default for Settings {
             ui_scale: 1.0,
             auto_update: true,
             update_api: String::new(),
+            relay_url: String::new(),
+            device_name: String::new(),
             schema: SETTINGS_SCHEMA,
         }
     }
@@ -253,6 +275,16 @@ impl AppPaths {
     }
     pub fn logs_dir(&self) -> PathBuf {
         self.root.join("logs")
+    }
+    /// 電腦版的「文件\語音轉錄」：收到的檔案、收到的會議（沒設匯出資料夾時）放這裡。
+    /// 設了 `MEETSCRIBE_HOME`（可攜版、測試）就放在它底下，不碰使用者的文件資料夾。
+    pub fn documents_dir(&self) -> PathBuf {
+        if std::env::var_os("MEETSCRIBE_HOME").is_some_and(|h| !h.is_empty()) {
+            return self.root.join("文件");
+        }
+        directories::UserDirs::new()
+            .and_then(|u| u.document_dir().map(|d| d.join("語音轉錄")))
+            .unwrap_or_else(|| self.root.join("文件"))
     }
     /// Claude Code CLI 的工作目錄（空資料夾，避免讀到任何專案的 CLAUDE.md）。
     pub fn claude_workdir(&self) -> PathBuf {

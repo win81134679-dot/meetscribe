@@ -81,6 +81,8 @@ object Ic {
     val Stop = icon("stop", "M6,6h12v12H6z")
     val Download = icon("download", "M19,9h-4V3H9v6H5l7,7 7,-7zM5,18v2h14v-2H5z")
     val Record = icon("record", "M12,4a8,8 0,1 0,0.01 0z")
+    val Send = icon("send", "M2.01,21L23,12 2.01,3 2,10l15,2 -15,2z")
+    val Key = icon("key", "M12.65,10C11.83,7.67 9.61,6 7,6c-3.31,0 -6,2.69 -6,6s2.69,6 6,6c2.61,0 4.83,-1.67 5.65,-4H17v4h4v-4h2v-4H12.65zM7,14c-1.1,0 -2,-0.9 -2,-2s0.9,-2 2,-2 2,0.9 2,2 -0.9,2 -2,2z")
     val OpenIn = icon(
         "open",
         "M19,19H5V5h7V3H5c-1.11,0 -2,0.9 -2,2v14c0,1.1 0.89,2 2,2h14c1.1,0 2,-0.9 2,-2v-7h-2v7zM14,3v2h3.59" +

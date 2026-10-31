@@ -12,6 +12,7 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.Icon
@@ -134,30 +135,39 @@ private fun AppRoot(incoming: Uri?, onIncomingHandled: () -> Unit, jump: String?
             }
         },
     ) { pad ->
-        Box(Modifier.fillMaxSize().padding(pad)) {
-            val err = Repo.initError
-            when {
-                err != null -> InitError(err)
-                openProject != null -> ProjectScreen(openProject!!, onBack = { openProject = null })
-                openRecording != null -> RecordingScreen(
-                    openRecording!!,
-                    onBack = { openRecording = null },
-                    onOpenMeeting = { openProject = it },
-                    onTranscribe = { item ->
-                        useRecordingForNewJob(item)
-                        openRecording = null
-                        tab = Tab.New
-                    },
+        Column(Modifier.fillMaxSize().padding(pad)) {
+            // 傳到其他裝置：查收件匣、配對請求、收件詢問、進度（2026-10-31）
+            if (Repo.initError == null) {
+                TransferOverlays(
+                    onOpenProject = { openRecording = null; openProject = it },
+                    onOpenRecording = { openProject = null; openRecording = it },
                 )
-                tab == Tab.New -> NewJobScreen(
-                    incoming = incoming,
-                    onIncomingHandled = onIncomingHandled,
-                    onStarted = { id -> openProject = id },
-                    onOpenSettings = { tab = Tab.Settings },
-                )
-                tab == Tab.Projects -> ProjectsScreen(onOpen = { openProject = it })
-                tab == Tab.Recordings -> RecordingsScreen(onOpen = { openRecording = it.key })
-                else -> SettingsScreen()
+            }
+            Box(Modifier.weight(1f)) {
+                val err = Repo.initError
+                when {
+                    err != null -> InitError(err)
+                    openProject != null -> ProjectScreen(openProject!!, onBack = { openProject = null })
+                    openRecording != null -> RecordingScreen(
+                        openRecording!!,
+                        onBack = { openRecording = null },
+                        onOpenMeeting = { openProject = it },
+                        onTranscribe = { item ->
+                            useRecordingForNewJob(item)
+                            openRecording = null
+                            tab = Tab.New
+                        },
+                    )
+                    tab == Tab.New -> NewJobScreen(
+                        incoming = incoming,
+                        onIncomingHandled = onIncomingHandled,
+                        onStarted = { id -> openProject = id },
+                        onOpenSettings = { tab = Tab.Settings },
+                    )
+                    tab == Tab.Projects -> ProjectsScreen(onOpen = { openProject = it })
+                    tab == Tab.Recordings -> RecordingsScreen(onOpen = { openRecording = it.key })
+                    else -> SettingsScreen()
+                }
             }
         }
     }

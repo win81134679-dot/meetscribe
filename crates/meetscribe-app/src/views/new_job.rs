@@ -197,6 +197,10 @@ fn setup_card(app: &mut MeetApp, ui: &mut egui::Ui) {
                     crate::views::settings::key_box(ui, &app.worker, KeyKind::Google, &mut f.g_key, &mut f.g_status);
             });
     });
+    if changed && !app.transfer.peers.is_empty() {
+        // 配對後自動同步金鑰
+        app.worker.send(Cmd::Transfer(crate::worker::TransferCmd::SyncKeys { manual: false }));
+    }
     if changed {
         app.refresh_key_flags();
     }

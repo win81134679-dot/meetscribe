@@ -25,6 +25,7 @@ pub mod store;
 pub mod summary;
 pub mod textutil;
 pub mod timing;
+pub mod transfer;
 pub mod units;
 pub mod update;
 

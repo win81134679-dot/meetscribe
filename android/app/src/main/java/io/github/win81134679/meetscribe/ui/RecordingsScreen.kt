@@ -270,6 +270,7 @@ fun RecordingScreen(
     var savedTo by remember(key) { mutableStateOf<File?>(null) }
     var saving by remember { mutableStateOf(false) }
     var cost by remember(key) { mutableStateOf<Double?>(null) }
+    var sending by remember { mutableStateOf(false) }
     val player = rememberPlayer(it?.takeIf { r -> r.playable }?.path)
     LaunchedEffect(it?.key) {
         if (it != null && !it.isMeeting && it.duration > 0) {
@@ -371,6 +372,7 @@ fun RecordingScreen(
                         val f = it.file ?: return@IconLabelButton
                         scope.launch { runCatching { Files.shareAudio(ctx, f, it.title) }.onFailure { e -> Repo.toasts.emit(true to "無法分享：${e.message}") } }
                     }
+                    IconLabelButton(Ic.Send, "傳到其他裝置", enabled = !it.busy && (it.isMeeting || it.playable)) { sending = true }
                     IconLabelButton(Ic.Download, if (saving) "存檔中…" else "存到手機", enabled = it.playable && !saving) {
                         saving = true
                         scope.launch {
@@ -385,7 +387,11 @@ fun RecordingScreen(
                         }
                     }
                 }
-                Text("分享可以直接傳到 LINE、存到雲端硬碟或寄信。", color = pal.textMuted, style = MaterialTheme.typography.bodySmall)
+                Text(
+                    if (it.isMeeting) "分享可以直接傳到 LINE、存到雲端硬碟或寄信；「傳到其他裝置」會把整場會議（逐字稿、摘要、錄音）傳過去。"
+                    else "分享可以直接傳到 LINE、存到雲端硬碟或寄信；「傳到其他裝置」傳到你自己的電腦或另一支手機。",
+                    color = pal.textMuted, style = MaterialTheme.typography.bodySmall,
+                )
                 savedTo?.let { f ->
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Text(
@@ -432,6 +438,9 @@ fun RecordingScreen(
             },
             dismissButton = { TextButton(onClick = { confirmDelete = false }) { Text("取消") } },
         )
+    }
+    if (sending && it != null) {
+        SendToDeviceDialog(if (it.isMeeting) "meeting" else "recording", it.title, id = it.id) { sending = false }
     }
     meeting?.let { p ->
         DeleteMeetingDialog(p, onDismiss = { meeting = null }) {

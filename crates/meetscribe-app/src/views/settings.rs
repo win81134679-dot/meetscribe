@@ -2,7 +2,7 @@
 
 use crate::app::MeetApp;
 use crate::theme::{self, icon, pal};
-use crate::worker::{Cmd, UpdateStatus, Worker};
+use crate::worker::{Cmd, TransferCmd, UpdateStatus, Worker};
 use egui::{RichText, Ui};
 use meetscribe_core::claude_code;
 use meetscribe_core::config::{LlmProvider, Settings};
@@ -154,6 +154,7 @@ pub fn show(app: &mut MeetApp, ui: &mut Ui) {
     let mut save = false;
     let mut reset = false;
     let mut update_action = None;
+    let mut rename_device: Option<String> = None;
     egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
         ui.set_max_width(900.0);
         let p = pal(ui);
@@ -333,6 +334,10 @@ pub fn show(app: &mut MeetApp, ui: &mut Ui) {
             ui.checkbox(&mut d.deny_data_collection, "OpenRouter 只路由到不保留、不拿資料訓練的供應商（可能使部分模型無法使用）");
         });
 
+        theme::section(ui, "傳到其他裝置", |ui| {
+            rename_device = crate::views::transfer::devices_section(ui, &mut app.transfer, &app.worker);
+        });
+
         theme::section(ui, "關於與更新", |ui| {
             about_and_update(ui, app_update_view(&app.update, &app.device_id), &mut f.draft.auto_update, &mut update_action);
         });
@@ -378,6 +383,10 @@ pub fn show(app: &mut MeetApp, ui: &mut Ui) {
         });
         ui.add_space(24.0);
     });
+    if keys_changed && !app.transfer.peers.is_empty() {
+        // 配對後自動同步金鑰（2026-10-31 使用者：「配對後就同步喔！」）
+        app.worker.send(Cmd::Transfer(TransferCmd::SyncKeys { manual: false }));
+    }
     if keys_changed {
         app.refresh_key_flags();
     }
@@ -392,6 +401,14 @@ pub fn show(app: &mut MeetApp, ui: &mut Ui) {
     }
     if reset {
         app.settings_form.draft = Settings::default();
+    }
+    if let Some(name) = rename_device {
+        let mut s = app.settings.clone();
+        s.device_name = name;
+        app.apply_settings(s);
+        app.settings_form.draft.device_name = app.settings.device_name.clone();
+        app.worker.send(Cmd::Transfer(TransferCmd::Renamed));
+        app.toast("名稱已儲存", false);
     }
     if save {
         let s = app.settings_form.draft.clone();

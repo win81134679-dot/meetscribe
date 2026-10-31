@@ -85,6 +85,7 @@ object Repo {
         scope.launch { pollLoop() }
         scope.launch { startUpdates() }
         refreshRecordingsLater()
+        scope.launch { Transfers.load() }
     }
 
     // ---------- 更新 ----------
@@ -158,7 +159,7 @@ object Repo {
         version = st.optString("version")
     }
 
-    private fun parseKeys(o: JSONObject) = mapOf(
+    fun parseKeys(o: JSONObject) = mapOf(
         "openrouter" to o.optStringOrNull("openrouter"),
         "google" to o.optStringOrNull("google"),
     )
@@ -298,6 +299,15 @@ object Repo {
                 projects.update { list -> list.map { it.copy(busy = it.id in ids) } }
                 if (ids.isNotEmpty()) startService()
                 refreshRecordingsLater()
+            }
+            "transfer_inbox", "transfer_error", "transfer_progress", "transfer_done", "transfer_failed" -> Transfers.handle(e)
+            "transfer_received" -> {
+                Transfers.handle(e)
+                when (e.optString("kind")) {
+                    "file" -> Storage.scan(app, e.optJSONArray("paths").strings().map(::File))
+                    "recording" -> refreshRecordingsLater()
+                    else -> scope.launch { runCatching { refreshProjects() }; refreshRecordingsLater() }
+                }
             }
             "key_test" -> keyTests.update { it + (e.getString("kind") to KeyTest(e.optBoolean("ok"), e.optString("text"))) }
             "models" -> models.update {

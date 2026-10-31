@@ -154,6 +154,30 @@ PDF 是 `export/pdf.rs` 照 docx 模組的版面直接畫（krilla，手機沒�
 `android/test/ui.ps1` 用 uiautomator 依文字點擊、截圖。真的金鑰由使用者自己在 App 裡貼，測試流程不從認證管理員取出金鑰。
 `adb push`／`/sdcard` 路徑用 PowerShell 跑（Git Bash 會把 `/sdcard` 改寫成 Windows 路徑）。
 
+## 傳到其他裝置（2026-10-31，1.3.0）
+
+設計與使用者原話在 `PLAN.md` 的 M15，使用者看的說明在 README〈傳到其他裝置〉。程式：`meetscribe-core/src/transfer.rs`（加密、配對碼、分段、`Hub`、金鑰同步）、
+`relay/`（Cloudflare Worker＋R2＋D1）、電腦 `worker.rs` 的 `TransferCmd`／`TransferMsg`＋`views/transfer.rs`、手機 `bridge.rs` 的 `transfer_*`＋`core/Transfers.kt`＋`ui/TransferUi.kt`
+（op 名稱與事件欄位是契約，改一邊要改另一邊）。
+
+- **中轉站絕不能產生費用**（使用者：「絕對不可以讓我付到錢」）。Workers、D1 免費方案超量只會失敗；**會自動扣款的只有 R2**，所以：
+  任何新的 R2 PUT／GET／LIST 都要先過 `spendR2`（近 31 天加總到 `R2_CLASS_A_BUDGET`／`R2_CLASS_B_BUDGET` 就 503）；請求路徑裡不准用 LIST（確認上傳完、刪除都靠 D1 的 `chunks`）；
+  每段實際大小記帳、不能超過宣告的大小（暫存總量 8 GB 是照宣告大小算的）。刪除不收費。不要建議使用者升級 Workers 付費方案。
+- 刪除的四層：收完／拒收立刻刪 → 3 小時過期（cron 每 15 分，過期也拒絕下載）→ 每小時掃描刪超過 6 小時的（`sweep`）→ R2 生命週期 1 天（最短只能 1 天）。
+- 部署：`relay\deploy.ps1`（wrangler 已用使用者的 Cloudflare 帳號 OAuth 登入過，憑證在 `%APPDATA%\xdg.config\.wrangler`）。它會把真的 D1 ID 寫進 `wrangler.toml`（不是祕密）、
+  遠端建表（`schema.sql` 全是 `IF NOT EXISTS`，改 schema 只能加不能改）、設生命週期、部署、健康檢查。正式網址寫在 `config.rs` 的 `DEFAULT_RELAY_URL`。
+- `relay_url`：空白＝正式中轉站；`"off"`（`RELAY_OFF`）＝關閉。**測試一律用 off 或本機網址**，否則會真的連上正式中轉站登記假裝置（`ui_tests` 先寫一份 off 的設定檔）。
+- 本機中轉站：`cd relay; npx wrangler dev --local --port 8787 --ip 0.0.0.0 --test-scheduled`（模擬器用 `http://10.0.2.2:8787`，App 的 settings.json 設 `relay_url`）。
+  `wrangler.toml` 的 database_id 換過後本機資料庫是新的空庫，要先 `npx wrangler d1 execute meetscribe-relay --local --file schema.sql --yes`（症狀：`no such table: devices`）。
+  `/__scheduled?cron=...` 觸發清理；`--var SWEEP_EVERY_RUN:1 --var SWEEP_AGE_SECONDS:0` 測掃描、`--var R2_CLASS_A_BUDGET:5` 測預算到頂。
+- 端對端測試要設 `MEETSCRIBE_RELAY_TEST=<網址>` 才跑：`-p meetscribe-core --test transfer_relay`、`-p meetscribe-android transfer_ops`、`-p meetscribe-app desktop_workers`；
+  對正式中轉站跑也可以（用量很小、收完就刪）。命令列對手 `cargo run -p meetscribe-core --example transfer_peer -- <資料夾> <網址> <指令>`（id／pair／accept／send／recv／inbox／unpair／setkey／keys／synckeys），
+  金鑰存在該資料夾的 keys.json。`secrets::use_file_store` 是全程式一個（OnceLock），**同一個測試程式裡兩台裝置共用金鑰存放處**，金鑰同步的「補缺不覆蓋」要用兩個命令列程式測。
+  `pair` 從標準輸入讀配對碼：`tail -f code.txt | transfer_peer … pair <ID>` 再 `echo 123456 >> code.txt`（PowerShell 的 Add-Content 寫不進被 tail 開著的檔）。
+- API 金鑰同步（`Kind::Keys`）：只在記憶體裡加解密（`SecretBytes`、`receive_keys`），不准走寫暫存檔的路；`Hub::poll` 自動收存、`Hub::pair_confirm`／偵測到新配對時 `sync_keys(Fill)`、
+  改金鑰時 `sync_keys(Replace)`（電腦：設定頁與新增轉錄頁的 `key_box` 改了就送 `SyncKeys`；手機：bridge 的 `save_key`）。只同步存在金鑰存放處的，環境變數的不送。
+- 輪詢：程式開著時每 15 秒（使用者要金鑰改了馬上同步）、等配對另一邊時每 5 秒；電腦 `poll_wake`、手機 `Transfers.wake` 可以叫它馬上查。
+
 ## 架構圖
 
 `docs/架構圖/HTML/{執行架構圖,處理流程圖}.html`（diagram-design，eight-hue 配色；橘色只給「唯一付費」的 Nemotron）。

@@ -1,0 +1,12 @@
+{
+  "name": "meetscribe-relay",
+  "private": true,
+  "description": "語音轉錄：傳到自己其他裝置的中轉站（只轉手密文，收完就刪）",
+  "scripts": {
+    "dev": "wrangler dev --local --port 8787 --ip 0.0.0.0 --test-scheduled",
+    "deploy": "wrangler deploy"
+  },
+  "devDependencies": {
+    "wrangler": "4.156.0"
+  }
+}

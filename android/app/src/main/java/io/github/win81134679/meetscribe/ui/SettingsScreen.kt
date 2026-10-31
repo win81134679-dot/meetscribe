@@ -114,6 +114,8 @@ fun SettingsScreen() {
 
         ExportDefaults(settings) { ex -> save { put("export", ex) } }
 
+        DevicesCard()
+
         AboutUpdateCard(settings.optBoolean("auto_update", true)) { v -> save { put("auto_update", v) } }
 
         SectionCard("資料") {

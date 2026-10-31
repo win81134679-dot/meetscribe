@@ -1,0 +1,39 @@
+# 語音轉錄的中轉站（Cloudflare Workers＋R2＋D1）。部署：powershell -ExecutionPolicy Bypass -File relay\deploy.ps1
+name = "meetscribe-relay"
+main = "src/index.js"
+compatibility_date = "2026-10-01"
+workers_dev = true
+
+[[r2_buckets]]
+binding = "BUCKET"
+bucket_name = "meetscribe-relay"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "meetscribe-relay"
+# deploy.ps1 建好資料庫後填入（不是祕密）
+database_id = "ca115391-e555-41ee-a8bc-d1924650bcd5"
+
+# 每台裝置每分鐘最多 120 個請求
+[[ratelimits]]
+name = "LIMITER"
+namespace_id = "1001"
+
+  [ratelimits.simple]
+  limit = 120
+  period = 60
+
+# 沒人收的傳送 3 小時後刪：每 15 分鐘清一次（2026-10-31 使用者：「24小時改成3小時」）
+[triggers]
+crons = ["*/15 * * * *"]
+
+# 用量上限：伺服器記在部署者名下，所有裝了 App 的人都會用到，免費額度是 10 GB 暫存
+[vars]
+MAX_FILE_BYTES = "524288000"       # 單檔 500 MB
+MAX_CHUNK_BYTES = "67108864"       # 每段最多 64 MB（Workers 免費方案每個請求上限 100 MB）
+DAILY_BYTES = "2147483648"         # 每台每天 2 GB
+TOTAL_BYTES = "8589934592"         # 暫存總量 8 GB
+TRANSFER_TTL_SECONDS = "10800"     # 3 小時
+# R2 是唯一會收費的部分：近 31 天的操作次數擋在免費額度的八成（免費：寫入類每月 100 萬、讀取類 1000 萬）
+R2_CLASS_A_BUDGET = "800000"
+R2_CLASS_B_BUDGET = "8000000"

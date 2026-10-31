@@ -124,6 +124,8 @@ pub mod icon {
     pub const SPARKLE: &str = "\u{E945}";
     pub const OPEN: &str = "\u{E8A7}";
     pub const MONEY: &str = "\u{E8C7}";
+    pub const SEND: &str = "\u{E724}";
+    pub const DEVICES: &str = "\u{E772}";
 }
 
 /// 使用者設定金鑰、儲值會用到的外部頁面（未登入時對方會先導到登入頁再回來）。

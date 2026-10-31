@@ -70,6 +70,12 @@ fn render_screens() {
     running.created_at -= chrono::Duration::hours(1);
     ProjectStore::new(paths.projects_dir()).save(&running).unwrap();
 
+    // 不連正式的中轉站（傳到其他裝置的畫面另外塞假資料）
+    let settings = meetscribe_core::config::Settings {
+        relay_url: meetscribe_core::config::RELAY_OFF.into(),
+        ..Default::default()
+    };
+    settings.save(&paths).unwrap();
     let p2 = paths.clone();
     let mut harness = Harness::builder()
         .with_size(egui::vec2(1280.0, 820.0))
@@ -141,4 +147,66 @@ fn render_screens() {
         st.view = View::Settings;
     }
     shot(&mut harness, "13_update_ready");
+
+    // 傳到其他裝置：設定頁的配對清單、別台的配對請求、配對、傳送與進度
+    use crate::worker::{SendWhat, TransferJob, TransferMsg};
+    use meetscribe_core::transfer::{Inbox, PairRequest, Peer};
+    let peer = |id: &str, name: &str| Peer { id: id.into(), name: name.into(), pubkey: String::new(), paired_at: chrono::Local::now() };
+    harness.set_size(egui::vec2(1280.0, 3400.0));
+    {
+        let st = harness.state_mut();
+        crate::views::transfer::handle(
+            st,
+            TransferMsg::State {
+                enabled: true,
+                device_id: "K7Q2-9XMA".into(),
+                name: "辦公室電腦".into(),
+                peers: vec![peer("HPPT-5ZKF", "Pixel 9"), peer("M3RA-77QC", "家裡的筆電")],
+            },
+        );
+        st.view = View::Settings;
+    }
+    shot(&mut harness, "14_transfer_settings");
+    harness.set_size(egui::vec2(1280.0, 820.0));
+    {
+        let st = harness.state_mut();
+        let inbox = Inbox {
+            pair_requests: vec![PairRequest {
+                id: "r1".into(),
+                from: "Q8WE-4TZN".into(),
+                from_name: "Galaxy S26".into(),
+                from_pubkey: String::new(),
+                code: "089063".into(),
+            }],
+            ..Default::default()
+        };
+        crate::views::transfer::handle(st, TransferMsg::Inbox(Box::new(inbox)));
+        st.view = View::Project;
+        st.selected = Some(id);
+        st.project_ui.tab = Tab::Summary;
+    }
+    shot(&mut harness, "15_pair_request");
+    {
+        let st = harness.state_mut();
+        crate::views::transfer::handle(st, TransferMsg::Inbox(Box::default()));
+        st.transfer.open_pairing();
+    }
+    shot(&mut harness, "16_pairing");
+    {
+        let st = harness.state_mut();
+        st.transfer = Default::default();
+        crate::views::transfer::handle(
+            st,
+            TransferMsg::State {
+                enabled: true,
+                device_id: "K7Q2-9XMA".into(),
+                name: "辦公室電腦".into(),
+                peers: vec![peer("HPPT-5ZKF", "Pixel 9"), peer("M3RA-77QC", "家裡的筆電")],
+            },
+        );
+        let job = TransferJob { send: true, title: "2026-10-29 預算會議".into(), peer_name: "Pixel 9".into(), done: 23_000_000, total: 61_000_000 };
+        crate::views::transfer::handle(st, TransferMsg::Progress { key: "k1".into(), job });
+        st.transfer.open_send(SendWhat::Meeting(id), "2026-10-30 產品週會".into());
+    }
+    shot(&mut harness, "17_send_dialog");
 }

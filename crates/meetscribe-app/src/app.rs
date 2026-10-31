@@ -2,7 +2,7 @@
 
 use crate::player::AudioPlayer;
 use crate::theme::{self, icon, pal};
-use crate::views::{new_job::NewJobForm, project::ProjectUi, settings::SettingsForm};
+use crate::views::{new_job::NewJobForm, project::ProjectUi, settings::SettingsForm, transfer::TransferUi};
 use crate::widgets;
 use crate::worker::{Cmd, Msg, UpdateStatus, Worker};
 use chrono::{DateTime, Local};
@@ -63,6 +63,8 @@ pub struct MeetApp {
     pub has_google_key: bool,
     pub update: UpdateStatus,
     pub device_id: String,
+    /// 傳到其他裝置（2026-10-31）。
+    pub transfer: TransferUi,
     /// 已經叫安裝程式起來了（關閉時不要再叫一次）。
     installing: bool,
     /// 處理完成時視窗不在前景：讓工作列按鈕閃一下。
@@ -123,6 +125,7 @@ impl MeetApp {
             has_google_key,
             update: UpdateStatus::Idle,
             device_id,
+            transfer: TransferUi::default(),
             installing: false,
             attention: false,
             fitted: 0,
@@ -309,6 +312,7 @@ impl MeetApp {
                     }
                     self.update = status;
                 }
+                Msg::Transfer(m) => crate::views::transfer::handle(self, m),
             }
         }
     }
@@ -681,6 +685,7 @@ impl eframe::App for MeetApp {
                 },
             });
         self.delete_dialog(&ctx);
+        crate::views::transfer::overlays(self, &ctx);
         self.toasts_ui(&ctx);
     }
 

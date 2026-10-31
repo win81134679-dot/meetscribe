@@ -16,6 +16,7 @@ use meetscribe_core::openrouter::OpenRouter;
 use meetscribe_core::pipeline::{Engine, Event, EventSink, LogLevel};
 use meetscribe_core::secrets::{self, ApiKeys, KeyKind};
 use meetscribe_core::store::ProjectStore;
+use meetscribe_core::transfer::{self, Hub, KeySync, Kind, Notice, Outgoing, PairResult};
 use meetscribe_core::update::{self, Outcome, Platform, UpdateState};
 use crate::recordings::{Library, Recording};
 use serde_json::{Value, json};
@@ -48,6 +49,12 @@ struct Shared {
     tokens: Mutex<HashMap<Uuid, CancellationToken>>,
     queue: Mutex<Vec<Uuid>>,
     jobs: tmpsc::UnboundedSender<Job>,
+    /// 「傳到其他裝置」（中轉站網址, Hub）；網址或名稱改了就重開。
+    hub: Mutex<Option<(String, Arc<Hub>)>>,
+    /// 這台的預設名稱（手機型號，Kotlin 給）。
+    default_name: Mutex<String>,
+    /// 進行中的傳送／接收，可取消。
+    transfers: Mutex<HashMap<String, CancellationToken>>,
 }
 
 #[derive(Clone, Copy)]
@@ -99,6 +106,9 @@ impl Bridge {
             tokens: Mutex::default(),
             queue: Mutex::default(),
             jobs,
+            hub: Mutex::default(),
+            default_name: Mutex::new("Android 手機".into()),
+            transfers: Mutex::default(),
         });
         rt.spawn(job_runner(shared.clone(), rx));
         // 上次被系統關掉時還在跑的專案，標成中斷（可續跑）
@@ -270,6 +280,17 @@ impl Bridge {
             }
             "save_key" => {
                 secrets::save(kind(req)?, str_field(req, "key")?).map_err(|e| e.to_string())?;
+                // 配對後自動同步金鑰（2026-10-31 使用者：「配對後就同步喔！」）：改了就推到所有配對的裝置
+                if let Ok(hub) = s.hub()
+                    && !hub.peers().is_empty()
+                {
+                    let sh = s.clone();
+                    self.rt.spawn(async move {
+                        if let Err(e) = hub.sync_keys(None, KeySync::Replace).await {
+                            sh.emit(json!({ "type": "toast", "error": true, "text": format!("同步 API 金鑰失敗：{e}") }));
+                        }
+                    });
+                }
                 Ok(key_status())
             }
             "delete_key" => {
@@ -496,6 +517,151 @@ impl Bridge {
                 });
                 Ok(json!(price.map(|p| p * secs)))
             }
+            // ---------- 傳到其他裝置（2026-10-31） ----------
+            "transfer_state" => {
+                if let Some(n) = req["default_name"].as_str().map(str::trim).filter(|n| !n.is_empty()) {
+                    *s.default_name.lock().expect("name") = n.to_string();
+                }
+                Ok(s.transfer_state())
+            }
+            "transfer_set_name" => {
+                let name = str_field(req, "name")?.trim().to_string();
+                let mut st = s.settings();
+                st.device_name = name.clone();
+                st.save(&s.paths).map_err(|e| e.to_string())?;
+                *s.settings.lock().expect("settings") = st;
+                if let Ok(h) = s.hub() {
+                    h.set_name(&s.device_name());
+                }
+                Ok(s.transfer_state())
+            }
+            // 查收件匣：結果是 transfer_inbox 事件（Kotlin 在畫面開著時每分鐘叫一次）
+            "transfer_poll" => {
+                let hub = s.hub()?;
+                let sh = s.clone();
+                self.rt.spawn(async move {
+                    match hub.poll().await {
+                        Ok(inbox) => sh.emit(sh.inbox_view(&hub, &inbox)),
+                        Err(e) => sh.emit(json!({ "type": "transfer_error", "text": e.to_string() })),
+                    }
+                });
+                Ok(Value::Null)
+            }
+            "transfer_pair_start" => {
+                let hub = s.hub()?;
+                let id = self.rt.block_on(hub.pair_start(str_field(req, "to")?)).map_err(|e| e.to_string())?;
+                Ok(json!({ "id": id }))
+            }
+            "transfer_pair_accept" => {
+                let hub = s.hub()?;
+                self.rt.block_on(hub.pair_accept(str_field(req, "id")?)).map_err(|e| e.to_string())?;
+                Ok(Value::Null)
+            }
+            "transfer_pair_decline" => {
+                let hub = s.hub()?;
+                self.rt.block_on(hub.pair_decline(str_field(req, "id")?)).map_err(|e| e.to_string())?;
+                Ok(Value::Null)
+            }
+            "transfer_pair_confirm" => {
+                let hub = s.hub()?;
+                let r = self
+                    .rt
+                    .block_on(hub.pair_confirm(str_field(req, "id")?, str_field(req, "code")?))
+                    .map_err(|e| e.to_string())?;
+                Ok(match r {
+                    PairResult::Paired => json!({ "result": "paired", "peers": peers_view(&hub) }),
+                    PairResult::Wrong { left } => json!({ "result": "wrong", "left": left }),
+                    PairResult::Cancelled => json!({ "result": "cancelled" }),
+                })
+            }
+            "transfer_pair_cancel" => {
+                let hub = s.hub()?;
+                self.rt.block_on(hub.pair_cancel(str_field(req, "id")?)).map_err(|e| e.to_string())?;
+                Ok(Value::Null)
+            }
+            "transfer_unpair" => {
+                let hub = s.hub()?;
+                self.rt.block_on(hub.unpair(str_field(req, "peer")?)).map_err(|e| e.to_string())?;
+                Ok(s.transfer_state())
+            }
+            "transfer_rename_peer" => {
+                let hub = s.hub()?;
+                hub.transfer().rename_peer(str_field(req, "peer")?, str_field(req, "name")?).map_err(|e| e.to_string())?;
+                Ok(s.transfer_state())
+            }
+            // 傳送：kind = meeting（id＝會議）／recording（id＝錄音庫的錄音）／file（path）。進度是 transfer_progress 事件
+            "transfer_send" => {
+                let hub = s.hub()?;
+                let peer = str_field(req, "peer")?.to_string();
+                let out = s.outgoing(req)?;
+                let peer_name = hub.peers().into_iter().find(|p| p.id == peer).map(|p| p.name).unwrap_or_default();
+                let key = Uuid::new_v4().to_string();
+                let token = CancellationToken::new();
+                s.transfers.lock().expect("transfers").insert(key.clone(), token.clone());
+                let sh = s.clone();
+                let k = key.clone();
+                self.rt.spawn(async move {
+                    let title = out.title.clone();
+                    let mut progress = sh.progress_fn(&k, "send", &title, &peer_name);
+                    let r = hub.send(&peer, &out, &mut progress, &token).await;
+                    sh.transfers.lock().expect("transfers").remove(&k);
+                    sh.emit(match r {
+                        Ok(_) => json!({ "type": "transfer_done", "key": k, "direction": "send", "title": title, "peer_name": peer_name }),
+                        Err(e) => json!({ "type": "transfer_failed", "key": k, "direction": "send", "title": title, "error": e.to_string() }),
+                    });
+                });
+                Ok(json!({ "key": key }))
+            }
+            // 接收：mode = replace／copy（只對已經有的會議有意義）。收完放到該放的地方，發 transfer_received 事件
+            "transfer_receive" => {
+                let hub = s.hub()?;
+                let id = str_field(req, "id")?.to_string();
+                let item = hub.incoming(&id).ok_or("這筆已經不在收件匣（可能過期或被取消）")?;
+                let replace = req["mode"].as_str() == Some("replace");
+                let token = CancellationToken::new();
+                s.transfers.lock().expect("transfers").insert(id.clone(), token.clone());
+                let sh = s.clone();
+                self.rt.spawn(async move {
+                    let title = item.meta.title.clone();
+                    let mut progress = sh.progress_fn(&id, "receive", &title, &item.from_name);
+                    let staging = sh.paths.root.join("transfer").join("staging").join(&id);
+                    let r = hub.receive(&id, &staging, &mut progress, &token).await;
+                    sh.transfers.lock().expect("transfers").remove(&id);
+                    let placed = match r {
+                        Ok(got) => sh.place_received(&got, replace).await,
+                        Err(e) => Err(e.to_string()),
+                    };
+                    let _ = std::fs::remove_dir_all(&staging);
+                    sh.emit(match placed {
+                        Ok(mut v) => {
+                            v["type"] = json!("transfer_received");
+                            v["key"] = json!(id);
+                            v["title"] = json!(title);
+                            v["peer_name"] = json!(item.from_name);
+                            v
+                        }
+                        Err(e) => json!({ "type": "transfer_failed", "key": id, "direction": "receive", "title": title, "error": e }),
+                    });
+                });
+                Ok(Value::Null)
+            }
+            "transfer_decline" => {
+                let hub = s.hub()?;
+                self.rt.block_on(hub.decline(str_field(req, "id")?)).map_err(|e| e.to_string())?;
+                Ok(Value::Null)
+            }
+            // 設定頁「立即同步金鑰」：回傳送了幾台
+            "transfer_sync_keys" => {
+                let hub = s.hub()?;
+                let n = self.rt.block_on(hub.sync_keys(None, KeySync::Replace)).map_err(|e| e.to_string())?;
+                Ok(json!({ "sent": n, "peers": hub.peers().len() }))
+            }
+            "transfer_cancel" => {
+                if let Some(t) = s.transfers.lock().expect("transfers").get(str_field(req, "key")?) {
+                    t.cancel();
+                }
+                Ok(Value::Null)
+            }
             other => Err(format!("不認得的指令：{other}")),
         }
     }
@@ -658,6 +824,149 @@ impl Shared {
         Some(opts.target_dir(p))
             .filter(|d| d.is_dir())
             .or_else(|| p.exported.iter().find_map(|f| f.parent().filter(|d| d.is_dir()).map(PathBuf::from)))
+    }
+
+    /// 這台在配對清單上的名稱：設定的，或手機型號。
+    fn device_name(&self) -> String {
+        let n = self.settings().device_name.trim().to_string();
+        if n.is_empty() { self.default_name.lock().expect("name").clone() } else { n }
+    }
+
+    /// 「傳到其他裝置」：中轉站網址沒設定（還沒部署）就回錯誤。
+    fn hub(&self) -> Res<Arc<Hub>> {
+        let settings = self.settings();
+        let url = settings.relay().to_string();
+        if url.trim().is_empty() {
+            return Err("中轉站尚未啟用".into());
+        }
+        let mut g = self.hub.lock().expect("hub");
+        if let Some((u, h)) = g.as_ref()
+            && *u == url
+        {
+            return Ok(h.clone());
+        }
+        let h = Arc::new(Hub::open(&self.paths.root, &url, &self.device_name()).map_err(|e| e.to_string())?);
+        *g = Some((url, h.clone()));
+        Ok(h)
+    }
+
+    fn transfer_state(&self) -> Value {
+        let enabled = !self.settings().relay().trim().is_empty();
+        let hub = if enabled { self.hub().ok() } else { None };
+        json!({
+            "enabled": enabled,
+            "device_id": update::device_id(&self.paths.root),
+            "name": self.device_name(),
+            "peers": hub.as_ref().map(|h| peers_view(h)).unwrap_or_else(|| json!([])),
+        })
+    }
+
+    fn inbox_view(&self, hub: &Hub, inbox: &transfer::Inbox) -> Value {
+        let store = self.store();
+        let peers = hub.peers();
+        let name_of = |id: &str| peers.iter().find(|p| p.id == id).map(|p| p.name.clone()).unwrap_or_else(|| id.to_string());
+        json!({
+            "type": "transfer_inbox",
+            "pair_requests": inbox.pair_requests.iter().map(|r| json!({
+                "id": r.id, "from": r.from, "from_name": r.from_name, "code": r.code,
+            })).collect::<Vec<_>>(),
+            "my_pair_requests": inbox.my_pair_requests.iter().map(|r| json!({
+                "id": r.id, "to": r.to, "to_name": r.to_name, "status": r.status,
+            })).collect::<Vec<_>>(),
+            "incoming": inbox.incoming.iter().map(|i| json!({
+                "id": i.id, "from": i.from, "from_name": i.from_name, "kind": i.meta.kind, "kind_label": i.meta.kind.label(),
+                "title": i.meta.title, "total": i.meta.total, "files": i.meta.files.len(),
+                "exists": i.meta.project_id.is_some_and(|id| store.dir(id).join("project.json").is_file()),
+                "expires_in": i.expires_in_secs,
+            })).collect::<Vec<_>>(),
+            "notices": inbox.notices.iter().map(|n| match n {
+                Notice::Paired { peer } => json!({ "kind": "paired", "peer": peer, "peer_name": name_of(peer) }),
+                Notice::Unpaired { peer } => json!({ "kind": "unpaired", "peer": peer, "peer_name": name_of(peer) }),
+                Notice::PairCancelled { peer } => json!({ "kind": "pair_cancelled", "peer": peer, "peer_name": name_of(peer) }),
+                Notice::Received { peer, transfer } => json!({ "kind": "received", "peer": peer, "peer_name": name_of(peer), "transfer": transfer }),
+                Notice::Declined { peer, transfer } => json!({ "kind": "declined", "peer": peer, "peer_name": name_of(peer), "transfer": transfer }),
+            }).collect::<Vec<_>>(),
+            "peers_changed": inbox.peers_changed,
+            "peers": peers_view(hub),
+            "keys_synced": inbox.keys_synced.iter().map(|k| json!({ "peer_name": k.peer_name, "title": k.title })).collect::<Vec<_>>(),
+            "keys": key_status(),
+        })
+    }
+
+    /// 要傳的東西。
+    fn outgoing(&self, req: &Value) -> Res<Outgoing> {
+        match str_field(req, "kind")? {
+            "meeting" => {
+                let p = self.load(req)?;
+                if self.is_busy(p.id) {
+                    return Err("這場會議正在處理，完成後再傳".into());
+                }
+                Outgoing::meeting(&self.store(), &p).map_err(|e| e.to_string())
+            }
+            "recording" => {
+                let r = self.library.get(uuid(req)?).ok_or("找不到這段錄音")?;
+                Ok(Outgoing::file(Kind::Recording, &r.info.title, &r.path))
+            }
+            "file" => {
+                let path = PathBuf::from(str_field(req, "path")?);
+                if !path.is_file() {
+                    return Err(format!("找不到檔案：{}", path.display()));
+                }
+                let title = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                Ok(Outgoing::file(Kind::File, &title, &path))
+            }
+            k => Err(format!("不認得的種類：{k}")),
+        }
+    }
+
+    /// 進度事件（每 300 ms 最多一次）。
+    fn progress_fn(self: &Arc<Self>, key: &str, direction: &str, title: &str, peer: &str) -> impl FnMut(u64, u64) + Send + use<> {
+        let (sh, key, direction, title, peer) = (self.clone(), key.to_string(), direction.to_string(), title.to_string(), peer.to_string());
+        let mut last = std::time::Instant::now() - Duration::from_secs(1);
+        move |done, total| {
+            if last.elapsed() >= Duration::from_millis(300) || done == total {
+                last = std::time::Instant::now();
+                sh.emit(json!({
+                    "type": "transfer_progress", "key": key, "direction": direction, "title": title, "peer_name": peer,
+                    "done": done, "total": total,
+                }));
+            }
+        }
+    }
+
+    /// 收到的東西放到該放的地方：會議進會議記錄、錄音進錄音管理、檔案進「文件/語音轉錄/收到的檔案」。
+    async fn place_received(&self, got: &transfer::Received, replace: bool) -> Res<Value> {
+        match got.meta.kind {
+            Kind::Meeting => {
+                let mut export = self.settings().export;
+                self.fix_export_dir(&mut export);
+                let p = transfer::import_meeting(got, &self.store(), replace, export).map_err(|e| e.to_string())?;
+                self.emit(json!({ "type": "updated", "project": self.full_view(&p) }));
+                Ok(json!({ "kind": "meeting", "project_id": p.id }))
+            }
+            Kind::Recording => {
+                let src = got.paths().into_iter().next().ok_or("沒有錄音檔")?;
+                let name = src.file_name().map(|n| n.to_owned()).ok_or("沒有檔名")?;
+                let dir = self.library.root().join(Uuid::new_v4().to_string());
+                std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+                let dest = dir.join(name);
+                if std::fs::rename(&src, &dest).is_err() {
+                    std::fs::copy(&src, &dest).map_err(|e| e.to_string())?;
+                }
+                let d = match AudioTool::locate("") {
+                    Ok(audio) => audio.probe_duration(&dest).await.ok().filter(|d| *d > 0.0),
+                    Err(_) => None,
+                };
+                let r = self.library.add(&dest, &got.meta.title, d)?;
+                Ok(json!({ "kind": "recording", "recording_id": r.id }))
+            }
+            // 金鑰由 Hub::poll 自動收存，不會走到這裡
+            Kind::Keys => Err("金鑰不用手動接收".into()),
+            Kind::File => {
+                let paths = transfer::place_file(got, &self.exports_dir.join("收到的檔案")).map_err(|e| e.to_string())?;
+                Ok(json!({ "kind": "file", "paths": paths }))
+            }
+        }
     }
 
     /// 這場會議的錄音：播放用的高品質副本（Android 就是原始錄音），還沒做出來（處理中）就用原始檔。
@@ -949,6 +1258,15 @@ fn remove_entry(path: &std::path::Path) {
     } else {
         std::fs::remove_file(path)
     };
+}
+
+fn peers_view(hub: &Hub) -> Value {
+    Value::Array(
+        hub.peers()
+            .iter()
+            .map(|p| json!({ "id": p.id, "name": p.name, "paired_at": p.paired_at.format("%Y-%m-%d").to_string() }))
+            .collect(),
+    )
 }
 
 fn status_key(s: &ProjectStatus) -> (&'static str, Option<&str>) {
@@ -1331,6 +1649,105 @@ mod tests {
         opts["audio"] = json!(true);
         let files: Vec<PathBuf> = serde_json::from_value(ok(&b, json!({ "op": "export", "id": p["id"], "options": opts }))).unwrap();
         assert!(files.iter().any(|f| f.extension().unwrap() == "wav"), "還沒處理完的會議用原始錄音：{files:?}");
+    }
+
+    fn wait_event(b: &Bridge, ty: &str) -> Value {
+        for _ in 0..300 {
+            let evs: Vec<Value> = serde_json::from_str(&b.poll(Duration::from_millis(200))).unwrap();
+            if let Some(e) = evs.into_iter().find(|e| e["type"] == ty) {
+                return e;
+            }
+        }
+        panic!("沒有收到 {ty} 事件");
+    }
+
+    /// 「傳到其他裝置」的 JSON 契約（Kotlin 的 Repo 照這些欄位讀）。要開本機中轉站，見 meetscribe-core/tests/transfer_relay.rs。
+    #[test]
+    fn transfer_ops_pair_send_and_receive_via_local_relay() {
+        let Ok(url) = std::env::var("MEETSCRIBE_RELAY_TEST") else {
+            eprintln!("略過：沒有設定 MEETSCRIBE_RELAY_TEST");
+            return;
+        };
+        let (da, a) = bridge();
+        let (db, b) = bridge();
+        for x in [&a, &b] {
+            assert_eq!(ok(x, json!({ "op": "transfer_state" }))["enabled"], true, "預設用正式的中轉站");
+            let mut st = ok(x, json!({ "op": "state" }))["settings"].clone();
+            st["relay_url"] = json!("off");
+            ok(x, json!({ "op": "save_settings", "settings": st.clone() }));
+            assert_eq!(ok(x, json!({ "op": "transfer_state" }))["enabled"], false, "relay_url＝off 是關閉");
+            st["relay_url"] = json!(url);
+            ok(x, json!({ "op": "save_settings", "settings": st }));
+        }
+        let sa = ok(&a, json!({ "op": "transfer_state", "default_name": "Pixel 9" }));
+        assert_eq!(sa["enabled"], true);
+        assert_eq!(sa["name"], "Pixel 9");
+        ok(&a, json!({ "op": "transfer_set_name", "name": "我的手機" }));
+        let sb = ok(&b, json!({ "op": "transfer_state", "default_name": "Galaxy" }));
+        let (ida, idb) = (sa["device_id"].as_str().unwrap().to_string(), sb["device_id"].as_str().unwrap().to_string());
+
+        // 配對
+        ok(&b, json!({ "op": "transfer_poll" })); // 先登記
+        wait_event(&b, "transfer_inbox");
+        let req = ok(&a, json!({ "op": "transfer_pair_start", "to": idb }));
+        ok(&b, json!({ "op": "transfer_poll" }));
+        let inbox = wait_event(&b, "transfer_inbox");
+        let pr = &inbox["pair_requests"][0];
+        assert_eq!(pr["from"], ida.as_str());
+        assert_eq!(pr["from_name"], "我的手機");
+        let code = pr["code"].as_str().unwrap().to_string();
+        ok(&b, json!({ "op": "transfer_pair_accept", "id": pr["id"] }));
+        let r = ok(&a, json!({ "op": "transfer_pair_confirm", "id": req["id"], "code": "999999x" }));
+        if code != "999999" {
+            assert_eq!(r["result"], "wrong");
+            assert_eq!(r["left"], 2);
+        }
+        let r = ok(&a, json!({ "op": "transfer_pair_confirm", "id": req["id"], "code": code }));
+        assert_eq!(r["result"], "paired");
+        assert_eq!(r["peers"][0]["id"], idb.as_str());
+        ok(&b, json!({ "op": "transfer_poll" }));
+        let inbox = wait_event(&b, "transfer_inbox");
+        assert_eq!(inbox["peers"][0]["id"], ida.as_str());
+        assert!(inbox["notices"].as_array().unwrap().iter().any(|n| n["kind"] == "paired"));
+
+        // 傳一個匯出檔 → 收到的檔案
+        let f = da.path().join("週會.pdf");
+        std::fs::write(&f, b"%PDF-1.7 test").unwrap();
+        ok(&a, json!({ "op": "transfer_send", "peer": idb, "kind": "file", "path": f }));
+        assert_eq!(wait_event(&a, "transfer_done")["direction"], "send");
+        ok(&b, json!({ "op": "transfer_poll" }));
+        let inbox = wait_event(&b, "transfer_inbox");
+        let item = &inbox["incoming"][0];
+        assert_eq!(item["kind"], "file");
+        assert_eq!(item["title"], "週會.pdf");
+        assert_eq!(item["from_name"], "我的手機");
+        ok(&b, json!({ "op": "transfer_receive", "id": item["id"] }));
+        let got = wait_event(&b, "transfer_received");
+        assert_eq!(got["kind"], "file");
+        let path = PathBuf::from(got["paths"][0].as_str().unwrap());
+        assert_eq!(path, db.path().join("exports/收到的檔案/週會.pdf"));
+        assert_eq!(std::fs::read(&path).unwrap(), b"%PDF-1.7 test");
+
+        // 傳錄音庫的錄音 → 對方的錄音管理
+        let rec_dir = PathBuf::from(ok(&a, json!({ "op": "state" }))["recordings_dir"].as_str().unwrap());
+        let rf = rec_dir.join(Uuid::new_v4().to_string()).join("會議錄音.wav");
+        wav(&rf);
+        let rec = ok(&a, json!({ "op": "add_recording", "path": rf, "title": "早會錄音" }));
+        ok(&a, json!({ "op": "transfer_send", "peer": idb, "kind": "recording", "id": rec["id"] }));
+        wait_event(&a, "transfer_done");
+        ok(&b, json!({ "op": "transfer_poll" }));
+        let inbox = wait_event(&b, "transfer_inbox");
+        let item = &inbox["incoming"][0];
+        assert_eq!(item["kind"], "recording");
+        ok(&b, json!({ "op": "transfer_receive", "id": item["id"] }));
+        assert_eq!(wait_event(&b, "transfer_received")["kind"], "recording");
+        let list = ok(&b, json!({ "op": "list_recordings" }));
+        let r = list.as_array().unwrap().iter().find(|r| r["title"] == "早會錄音").expect("出現在對方的錄音管理");
+        assert!((r["duration"].as_f64().unwrap() - 1.0).abs() < 0.05);
+
+        // 取消配對
+        let st = ok(&a, json!({ "op": "transfer_unpair", "peer": idb }));
+        assert!(st["peers"].as_array().unwrap().is_empty());
     }
 
     #[test]
