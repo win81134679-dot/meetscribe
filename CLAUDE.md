@@ -11,11 +11,11 @@ repo `win81134679-dot/meetscribe`（2026-10-30 建，分支 `main`；**2026-10-3
 
 ## Y: 備份
 
-2026-10-31 使用者：「做完備份到Y:」。NAS 的 `Y:. NVIDIA Nemotron 3.5 Transcribe 逐字稿轉錄模型`（Y: 的資料夾照編號，Filee 是 4）。
+2026-10-31 使用者：「做完備份到Y:」。NAS 的 `Y:\5. NVIDIA Nemotron 3.5 Transcribe 逐字稿轉錄模型`（Y: 的資料夾照編號，Filee 是 4）。
 發佈新版或動到簽章檔之後跑一次（結束碼 0–3 是成功、≥8 才是失敗）：
 
 ```powershell
-$src = "$PWD"; robocopy $src "Y:. NVIDIA Nemotron 3.5 Transcribe 逐字稿轉錄模型" /MIR /XD "$src	arget" "$srcndroid\.gradle" "$srcndroid\.kotlin" "$srcndroiduild" "$srcndroidppuild" "$srcndroidpp\src\main\jniLibs" /R:2 /W:3 /NFL /NDL /NP /XJ
+$src = "$PWD"; robocopy $src "Y:\5. NVIDIA Nemotron 3.5 Transcribe 逐字稿轉錄模型" /MIR /XD "$src\target" "$src\android\.gradle" "$src\android\.kotlin" "$src\android\build" "$src\android\app\build" "$src\android\app\src\main\jniLibs" /R:2 /W:3 /NFL /NDL /NP /XJ
 ```
 
 不備份的都能重建。`keys\`（更新簽章）與 `android\keystore*`（APK 簽章）的另一份就在 Y:；**只能本機 → Y:，絕不拿 Y: 那份蓋回本機**。
