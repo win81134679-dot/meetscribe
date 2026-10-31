@@ -107,6 +107,11 @@ object Transfers {
         return true
     }
 
+    /** 摘要頁「同步到其他裝置」：標題、摘要、逐字稿、說話者送到配對的裝置（結果之後以提示顯示）。 */
+    suspend fun syncMeeting(id: String) {
+        if (Repo.tryCall("transfer_sync_meeting", "id" to id) != null) wake.tryEmit(Unit)
+    }
+
     /** 設定頁「立即同步金鑰」：把這台的金鑰推到所有配對的裝置。 */
     suspend fun syncKeys() {
         val r = Repo.tryCall("transfer_sync_keys") as? JSONObject ?: return
@@ -152,6 +157,20 @@ object Transfers {
                 val synced = e.optJSONArray("keys_synced").objects()
                 for (k in synced) Repo.toasts.tryEmit(false to "已從「${k.optString("peer_name")}」同步 API 金鑰：${k.optString("title")}")
                 if (synced.isNotEmpty()) e.optJSONObject("keys")?.let { Repo.keys.value = Repo.parseKeys(it) }
+                // 別台送來的會議內容更新（Rust 已經套用，畫面由 updated 事件換新）
+                for (u in e.optJSONArray("meetings_updated").objects()) {
+                    Repo.toasts.tryEmit(false to "「${u.optString("peer_name")}」更新了「${u.optString("title")}」的內容（摘要頁可以還原上一版）")
+                }
+                // 我送出的會議內容更新：各台結果，同一場會議併成一則
+                e.optJSONArray("content_results").objects().groupBy { it.optString("title") }.forEach { (title, rs) ->
+                    val ok = rs.filter { it.optBoolean("applied") }.map { it.optString("peer_name") }
+                    val missing = rs.filterNot { it.optBoolean("applied") }.map { it.optString("peer_name") }
+                    val parts = buildList {
+                        if (ok.isNotEmpty()) add("已更新 ${ok.size} 台（${ok.joinToString("、")}）")
+                        if (missing.isNotEmpty()) add("${missing.size} 台沒有這場會議（${missing.joinToString("、")}）")
+                    }
+                    Repo.toasts.tryEmit(false to "「$title」：${parts.joinToString("；")}")
+                }
                 // 配對完成或過期（5 分鐘）的就不用再顯示配對碼
                 val now = System.currentTimeMillis()
                 accepted.update { m -> m.filter { (from, v) -> peers.none { it.id == from } && now - v.second < 5 * 60_000 } }

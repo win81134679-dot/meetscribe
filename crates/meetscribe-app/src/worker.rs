@@ -57,6 +57,8 @@ pub enum TransferCmd {
     Cancel(String),
     /// 把這台的 API 金鑰推到所有配對的裝置（改了金鑰時自動、或設定頁按「立即同步金鑰」）。`manual`：結果要明講。
     SyncKeys { manual: bool },
+    /// 摘要頁「同步到其他裝置」：這場會議的標題、摘要、逐字稿、說話者送給所有配對的裝置，有同一場會議的會自動更新。
+    SyncMeeting(Uuid),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -631,6 +633,27 @@ async fn transfer_cmd(shared: &Arc<Shared>, cmd: TransferCmd) {
         TransferCmd::Receive { id, replace } => transfer_receive(shared, &hub, &id, replace).await,
         TransferCmd::Decline(id) => hub.decline(&id).await.map(|_| shared.poll_wake.notify_one()).map_err(|e| e.to_string()),
         TransferCmd::Cancel(_) => Ok(()),
+        TransferCmd::SyncMeeting(id) => {
+            if shared.queue.lock().expect("queue").contains(&id) {
+                return shared.toast_err("這場會議正在處理，完成後再同步");
+            }
+            let store = ProjectStore::new(shared.paths.projects_dir());
+            match store.load(id) {
+                Ok(p) => match hub.sync_meeting(&p).await {
+                    Ok(0) => Err("還沒有配對的裝置：到「設定 → 傳到其他裝置」配對".into()),
+                    Ok(n) => {
+                        shared.send(Msg::Toast {
+                            error: false,
+                            text: format!("已把「{}」送到 {n} 台裝置，有這場會議的會自動更新", p.title),
+                        });
+                        shared.poll_wake.notify_one();
+                        Ok(())
+                    }
+                    Err(e) => Err(format!("同步「{}」失敗：{e}", p.title)),
+                },
+                Err(e) => Err(e.to_string()),
+            }
+        }
         TransferCmd::SyncKeys { manual } => match hub.sync_keys(None, KeySync::Replace).await {
             Ok(n) if manual || n > 0 => {
                 let text = match n {
@@ -752,7 +775,7 @@ fn place_received(shared: &Arc<Shared>, got: &transfer::Received, replace: bool)
             Ok(ReceivedView { project: Some(p), ..empty })
         }
         // 金鑰由 Hub::poll 自動收存，不會走到這裡
-        Kind::Keys => Err("金鑰不用手動接收".into()),
+        Kind::Keys | Kind::Update => Err("金鑰與會議內容更新不用手動接收".into()),
         Kind::Recording | Kind::File => {
             let dir = shared.paths.documents_dir().join("收到的檔案");
             let paths = transfer::place_file(got, &dir).map_err(|e| e.to_string())?;
@@ -818,6 +841,9 @@ mod tests {
         // 收到的檔案放在測試資料夾裡，不碰使用者的文件資料夾
         // SAFETY: 測試開頭設一次，這個測試的 worker 都還沒讀
         unsafe { std::env::set_var("MEETSCRIBE_HOME", "test") };
+        // 金鑰存在測試資料夾（配對時會自動同步金鑰，不能讀到這台認證管理員裡的真金鑰）
+        let keys = tempfile::tempdir().unwrap();
+        meetscribe_core::secrets::use_file_store(keys.path().join("keys.json"));
         let (ta, a) = start(&url);
         let (tb, b) = start(&url);
         let id_of = |w: &Worker| {
@@ -888,6 +914,22 @@ mod tests {
             let export = q.options.export.expect("輸出選項");
             assert_eq!(PathBuf::from(&export.dir), tb.path().join("文件"), "沒設匯出資料夾時放「文件 語音轉錄」");
         }
+
+        // 手動同步會議內容：A 改摘要 → B 有這場會議，自動更新；A 看到「已更新」
+        p.summary = Some(meetscribe_core::model::Summary {
+            markdown: "## 決議
+- 預算改成 60 萬".into(),
+            model: "手動".into(),
+            created_at: chrono::Local::now(),
+            instructions: String::new(),
+        });
+        store_a.save(&p).unwrap();
+        a.send(Cmd::Transfer(TransferCmd::SyncMeeting(p.id)));
+        let up = poll_until(&b, "會議內容更新", |i| i.meetings_updated.first().map(|u| u.project.clone()));
+        assert_eq!(up.id, p.id);
+        assert!(up.summary.unwrap().markdown.contains("60 萬"));
+        let r = poll_until(&a, "同步結果", |i| i.content_results.first().cloned());
+        assert!(r.applied, "{r:?}");
 
         // 取消配對：兩邊都拿掉
         a.send(Cmd::Transfer(TransferCmd::Unpair(idb)));

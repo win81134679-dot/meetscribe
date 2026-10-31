@@ -3,7 +3,8 @@
 use crate::app::MeetApp;
 use crate::theme::{self, icon, pal};
 use crate::widgets::{self, speaker_chip, speaker_color};
-use crate::worker::{Cmd, SendWhat};
+use crate::worker::{Cmd, SendWhat, TransferCmd};
+use meetscribe_core::transfer;
 use egui::{Margin, RichText, Stroke, Ui};
 use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
 use meetscribe_core::config::Settings;
@@ -72,6 +73,10 @@ enum Action {
     Settings(Box<Settings>),
     /// 傳到其他裝置：整場會議（None）或一個匯出檔。
     SendToDevice(Option<PathBuf>),
+    /// 摘要頁「同步到其他裝置」：標題、摘要、逐字稿、說話者送到有同一場會議的裝置。
+    SyncContent,
+    /// 還原成收到別台內容之前的樣子。
+    RestoreContent,
 }
 
 pub fn show(app: &mut MeetApp, ui: &mut Ui, id: Uuid) {
@@ -139,12 +144,14 @@ pub fn show(app: &mut MeetApp, ui: &mut Ui, id: Uuid) {
     match app.project_ui.tab {
         Tab::Summary => {
             let settings = app.settings.clone();
+            let sync = ContentSync { peers: !app.transfer.peers.is_empty(), has_previous: transfer::has_previous_content(&app.store, id) };
             summary_tab(
                 ui,
                 &mut app.projects[idx],
                 &mut app.project_ui,
                 &settings,
                 editable,
+                sync,
                 &mut actions,
             )
         }
@@ -207,6 +214,17 @@ fn apply(app: &mut MeetApp, id: Uuid, actions: Vec<Action>) {
             Action::Toast(t, e) => app.toast(t, e),
             Action::Export => export_now(app, id),
             Action::Settings(s) => app.apply_settings(*s),
+            Action::SyncContent => {
+                app.save_now();
+                app.worker.send(Cmd::Transfer(TransferCmd::SyncMeeting(id)));
+            }
+            Action::RestoreContent => match transfer::restore_previous_content(&app.store, id) {
+                Ok(p) => {
+                    app.upsert(p);
+                    app.toast("已還原成同步之前的內容", false);
+                }
+                Err(e) => app.toast(format!("還原失敗：{e}"), true),
+            },
             Action::SendToDevice(file) => {
                 app.save_now();
                 match file {
@@ -372,12 +390,22 @@ fn log_text(ui: &Ui, level: LogLevel, text: &str) -> RichText {
 
 // ---------- 摘要 ----------
 
+/// 摘要頁的「同步到其他裝置」與「還原上一版」要不要顯示。
+#[derive(Clone, Copy)]
+struct ContentSync {
+    /// 有配對的裝置。
+    peers: bool,
+    /// 收過別台的內容更新，可以還原。
+    has_previous: bool,
+}
+
 fn summary_tab(
     ui: &mut Ui,
     p: &mut Project,
     st: &mut ProjectUi,
     settings: &Settings,
     editable: bool,
+    sync: ContentSync,
     actions: &mut Vec<Action>,
 ) {
     let pl = pal(ui);
@@ -436,6 +464,22 @@ fn summary_tab(
                 {
                     st.summary_edit = !st.summary_edit;
                     st.summary_buf = sum.markdown.clone();
+                }
+                if sync.has_previous
+                    && editable
+                    && theme::button(ui, Some(icon::REFRESH), "還原上一版")
+                        .on_hover_text("還原成收到其他裝置的內容之前的樣子（只能還原一次）")
+                        .clicked()
+                {
+                    actions.push(Action::RestoreContent);
+                }
+                if sync.peers
+                    && editable
+                    && theme::button(ui, Some(icon::SEND), "同步到其他裝置")
+                        .on_hover_text("標題、摘要、逐字稿、說話者送到配對的裝置；有這場會議的會自動更新")
+                        .clicked()
+                {
+                    actions.push(Action::SyncContent);
                 }
                 if theme::button(ui, Some(icon::COPY), "複製").clicked() {
                     ui.ctx().copy_text(sum.markdown.clone());

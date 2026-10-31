@@ -541,7 +541,12 @@ impl Bridge {
                 let sh = s.clone();
                 self.rt.spawn(async move {
                     match hub.poll().await {
-                        Ok(inbox) => sh.emit(sh.inbox_view(&hub, &inbox)),
+                        Ok(inbox) => {
+                            for u in &inbox.meetings_updated {
+                                sh.emit(json!({ "type": "updated", "project": sh.full_view(&u.project) }));
+                            }
+                            sh.emit(sh.inbox_view(&hub, &inbox))
+                        }
                         Err(e) => sh.emit(json!({ "type": "transfer_error", "text": e.to_string() })),
                     }
                 });
@@ -649,6 +654,37 @@ impl Bridge {
                 let hub = s.hub()?;
                 self.rt.block_on(hub.decline(str_field(req, "id")?)).map_err(|e| e.to_string())?;
                 Ok(Value::Null)
+            }
+            // 摘要頁「同步到其他裝置」（2026-10-31 使用者：「手動同步摘要…逐字稿 說話者都同步」）：
+            // 標題、摘要、逐字稿、說話者送給所有配對的裝置，有同一場會議的會自動更新；結果之後在 transfer_inbox 的 content_results
+            "transfer_sync_meeting" => {
+                let hub = s.hub()?;
+                let p = s.load(req)?;
+                if s.is_busy(p.id) {
+                    return Err("這場會議正在處理，完成後再同步".into());
+                }
+                let sh = s.clone();
+                self.rt.spawn(async move {
+                    let text = match hub.sync_meeting(&p).await {
+                        Ok(0) => Err("還沒有配對的裝置：到「設定 → 傳到其他裝置」配對".to_string()),
+                        Ok(n) => Ok(format!("已把「{}」送到 {n} 台裝置，有這場會議的會自動更新", p.title)),
+                        Err(e) => Err(format!("同步「{}」失敗：{e}", p.title)),
+                    };
+                    let (error, text) = match text {
+                        Ok(t) => (false, t),
+                        Err(t) => (true, t),
+                    };
+                    sh.emit(json!({ "type": "toast", "error": error, "text": text }));
+                });
+                Ok(Value::Null)
+            }
+            // 還原成收到別台內容之前的樣子
+            "restore_content" => {
+                let id = uuid(req)?;
+                let p = transfer::restore_previous_content(&s.store(), id).map_err(|e| e.to_string())?;
+                let v = s.full_view(&p);
+                s.emit(json!({ "type": "updated", "project": v.clone() }));
+                Ok(v)
             }
             // 設定頁「立即同步金鑰」：回傳送了幾台
             "transfer_sync_keys" => {
@@ -889,6 +925,8 @@ impl Shared {
             "peers_changed": inbox.peers_changed,
             "peers": peers_view(hub),
             "keys_synced": inbox.keys_synced.iter().map(|k| json!({ "peer_name": k.peer_name, "title": k.title })).collect::<Vec<_>>(),
+            "meetings_updated": inbox.meetings_updated.iter().map(|u| json!({ "peer_name": u.peer_name, "title": u.project.title, "project_id": u.project.id })).collect::<Vec<_>>(),
+            "content_results": inbox.content_results.iter().map(|r| json!({ "peer_name": r.peer_name, "title": r.title, "applied": r.applied })).collect::<Vec<_>>(),
             "keys": key_status(),
         })
     }
@@ -961,7 +999,7 @@ impl Shared {
                 Ok(json!({ "kind": "recording", "recording_id": r.id }))
             }
             // 金鑰由 Hub::poll 自動收存，不會走到這裡
-            Kind::Keys => Err("金鑰不用手動接收".into()),
+            Kind::Keys | Kind::Update => Err("金鑰與會議內容更新不用手動接收".into()),
             Kind::File => {
                 let paths = transfer::place_file(got, &self.exports_dir.join("收到的檔案")).map_err(|e| e.to_string())?;
                 Ok(json!({ "kind": "file", "paths": paths }))
@@ -1123,6 +1161,7 @@ impl Shared {
             "models": p.models,
             "warnings": p.warnings,
             "exported": p.exported,
+            "has_previous_content": transfer::has_previous_content(&store, p.id),
             "folder": self.meeting_folder(p),
             "export_files": self.export_files(p),
             // 原始檔是錄音庫裡的錄音（還沒處理完）：刪掉會議後錄音留在錄音管理

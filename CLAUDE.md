@@ -53,6 +53,7 @@ $src = "$PWD"; robocopy $src "Y:\5. NVIDIA Nemotron 3.5 Transcribe 逐字稿轉�
 1.2.1（手機會議頁四個分頁可左右滑動，`HorizontalPager`）只發 Android（`--only android`；`update::pick` 會跳過沒有該平台安裝檔的 Release，電腦版停在 1.2.0）。
 1.3.0（傳到其他裝置＋API 金鑰自動同步，見〈傳到其他裝置〉）同日發佈給所有裝置：線上 update.json 的兩個雜湊與建置輸出相同，`update_check` 電腦從 1.2.0、手機從 1.2.1 都挑到它。
 1.3.1（電腦版設定的「儲存設定」固定在底部、舊會議匯出頁補勾 PDF：`ExportOptions.rev`＋`upgrade()` 在 `ProjectStore::load`）同日發佈給所有裝置，`update_check` 兩個平台從 1.3.0 都挑到它。
+1.3.2（手動同步會議內容：摘要頁「同步到其他裝置」、收件端自動套用＋還原上一版，見〈傳到其他裝置〉）同日發佈給所有裝置，`update_check` 兩個平台從 1.3.1 都挑到它。
 建 APK 時模擬器要先關（`adb emu kill`）：兩個一起開 Gradle daemon 會被系統砍掉（記憶體不夠）。
 建置時記憶體吃緊（可用虛擬記憶體不到 2 GB）連 `-j 1` 都會 OOM，請使用者先關程式，不要改 LTO 或另開 target 目錄硬編。
 快速開啟：專案根目錄的 `開啟 語音轉錄.cmd`（`%~dp0` 相對路徑，不寫死中文路徑）指向 `target\release\meetscribe-app.exe`。
@@ -178,6 +179,8 @@ PDF 是 `export/pdf.rs` 照 docx 模組的版面直接畫（krilla，手機沒�
   `pair` 從標準輸入讀配對碼：`tail -f code.txt | transfer_peer … pair <ID>` 再 `echo 123456 >> code.txt`（PowerShell 的 Add-Content 寫不進被 tail 開著的檔）。
 - API 金鑰同步（`Kind::Keys`）：只在記憶體裡加解密（`SecretBytes`、`receive_keys`），不准走寫暫存檔的路；`Hub::poll` 自動收存、`Hub::pair_confirm`／偵測到新配對時 `sync_keys(Fill)`、
   改金鑰時 `sync_keys(Replace)`（電腦：設定頁與新增轉錄頁的 `key_box` 改了就送 `SyncKeys`；手機：bridge 的 `save_key`）。只同步存在金鑰存放處的，環境變數的不送。
+- 會議內容同步（`Kind::Update`，1.3.2）：`Hub::sync_meeting` 送給所有配對裝置，`Hub::poll` 自動 `apply_meeting_content`（有同一個會議 ID 才套用、先存 `previous-content.json`）並 `Transfer::ack`；
+  寄件端用 `content_sent` 把對方的 Received／Declined 通知換成 `ContentResult`。同步的欄位在 `MeetingContent`，Project 新增可編輯的欄位時要一起加。整場會議傳送不帶 `previous-content.json`。
 - 輪詢：程式開著時每 15 秒（使用者要金鑰改了馬上同步）、等配對另一邊時每 5 秒；電腦 `poll_wake`、手機 `Transfers.wake` 可以叫它馬上查。
 
 ## 架構圖

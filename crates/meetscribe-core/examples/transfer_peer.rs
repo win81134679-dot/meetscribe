@@ -12,6 +12,9 @@
 //!   setkey <openrouter|google> <金鑰>  存一把金鑰（這台虛擬裝置自己的 keys.json）
 //!   keys                  印出這台的金鑰（遮住中間）
 //!   synckeys              把這台的金鑰推到所有配對的裝置（取代對方的）
+//!   retitle <會議ID> <標題>  改這台某場會議的標題（測同步用）
+//!   syncmeeting <會議ID>   把這場會議的內容（標題、摘要、逐字稿、說話者）同步到所有配對的裝置
+//!   meetings              列出這台的會議（同步來的更新在 inbox 時自動套用）
 
 use meetscribe_core::secrets::{self, KeyKind};
 use meetscribe_core::transfer::{Hub, KeySync, Kind, Outgoing, PairResult};
@@ -135,6 +138,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "keys" => {
             for kind in [KeyKind::OpenRouter, KeyKind::Google] {
                 println!("{kind:?}: {}", secrets::load(kind).map(|(k, _)| secrets::mask(&k)).unwrap_or_else(|| "（沒有）".into()));
+            }
+        }
+        "retitle" | "syncmeeting" | "meetings" => {
+            let store = meetscribe_core::store::ProjectStore::new(root.join("projects"));
+            match args[2].as_str() {
+                "meetings" => {
+                    for p in store.list() {
+                        println!("{}  {}  摘要：{}", p.id, p.title, p.summary.as_ref().map(|s| s.markdown.chars().take(30).collect::<String>()).unwrap_or_default());
+                    }
+                }
+                "retitle" => {
+                    let mut p = store.load(args[3].parse()?)?;
+                    p.title = args[4].clone();
+                    store.save(&p)?;
+                    println!("已改名");
+                }
+                _ => {
+                    let p = store.load(args[3].parse()?)?;
+                    println!("送到 {} 台", hub.sync_meeting(&p).await?);
+                }
             }
         }
         "synckeys" => {

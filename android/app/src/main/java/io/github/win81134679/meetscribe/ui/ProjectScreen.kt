@@ -65,6 +65,7 @@ import io.github.win81134679.meetscribe.core.ProjectDetail
 import io.github.win81134679.meetscribe.core.Repo
 import io.github.win81134679.meetscribe.core.Segment
 import io.github.win81134679.meetscribe.core.Storage
+import io.github.win81134679.meetscribe.core.Transfers
 import io.github.win81134679.meetscribe.core.formatClock
 import io.github.win81134679.meetscribe.core.strings
 import kotlinx.coroutines.delay
@@ -441,6 +442,7 @@ private fun SummaryTab(p: ProjectDetail, busy: Boolean) {
     val scope = rememberCoroutineScope()
     var regen by remember { mutableStateOf(false) }
     var working by remember(p.summaryDoc?.createdAt) { mutableStateOf(false) }
+    val peers = Transfers.state.collectAsState().value.peers
     LaunchedEffect(Unit) {
         Repo.toasts.collect { (err, _) -> if (err) working = false }
     }
@@ -452,6 +454,13 @@ private fun SummaryTab(p: ProjectDetail, busy: Boolean) {
         FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             if (s != null) IconLabelButton(Ic.Copy, "複製") { copyText(ctx, "摘要", s.markdown) }
             if (s != null) IconLabelButton(Ic.Share, "分享文字") { Files.shareText(ctx, s.markdown) }
+            // 同步到其他裝置（標題、摘要、逐字稿、說話者），有同一場會議的會自動更新
+            if (peers.isNotEmpty()) IconLabelButton(Ic.Send, "同步到其他裝置", enabled = !busy) { scope.launch { Transfers.syncMeeting(p.id) } }
+            if (p.hasPreviousContent) IconLabelButton(Ic.Refresh, "還原上一版", enabled = !busy) {
+                scope.launch {
+                    if (Repo.tryCall("restore_content", "id" to p.id) != null) Repo.toasts.tryEmit(false to "已還原成同步之前的內容")
+                }
+            }
             IconLabelButton(Ic.Refresh, if (s == null) "產生摘要" else "重新產生", enabled = !busy && !working && p.segments.isNotEmpty()) {
                 regen = true
             }

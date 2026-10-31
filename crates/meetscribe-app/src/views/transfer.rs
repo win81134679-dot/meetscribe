@@ -68,6 +68,7 @@ pub fn handle(app: &mut MeetApp, m: TransferMsg) {
     let t = &mut app.transfer;
     let mut toasts: Vec<(String, bool)> = Vec::new();
     let mut keys_synced = false;
+    let mut updated: Vec<meetscribe_core::model::Project> = Vec::new();
     match m {
         TransferMsg::State { enabled, device_id, name, peers } => {
             t.accepted.retain(|from, _| peers.iter().all(|p| p.id != *from));
@@ -80,6 +81,30 @@ pub fn handle(app: &mut MeetApp, m: TransferMsg) {
             }
             if !inbox.keys_synced.is_empty() {
                 keys_synced = true;
+            }
+            // 別台送來的會議內容更新（已經套用好）
+            for u in &inbox.meetings_updated {
+                toasts.push((
+                    format!("「{}」更新了「{}」的內容（摘要頁可以還原上一版）", u.peer_name, u.project.title),
+                    false,
+                ));
+                updated.push(u.project.clone());
+            }
+            // 我送出的會議內容更新：各台結果（同一場會議併成一則）
+            let mut by_title: BTreeMap<String, (Vec<String>, Vec<String>)> = BTreeMap::new();
+            for r in &inbox.content_results {
+                let e = by_title.entry(r.title.clone()).or_default();
+                if r.applied { e.0.push(r.peer_name.clone()) } else { e.1.push(r.peer_name.clone()) }
+            }
+            for (title, (ok, missing)) in by_title {
+                let mut parts = Vec::new();
+                if !ok.is_empty() {
+                    parts.push(format!("已更新 {} 台（{}）", ok.len(), ok.join("、")));
+                }
+                if !missing.is_empty() {
+                    parts.push(format!("{} 台沒有這場會議（{}）", missing.len(), missing.join("、")));
+                }
+                toasts.push((format!("「{title}」：{}", parts.join("；")), false));
             }
             for n in &inbox.notices {
                 let name_of = |id: &str| t.peers.iter().find(|p| p.id == id).map(|p| p.name.clone()).unwrap_or(id.to_string());
@@ -137,6 +162,13 @@ pub fn handle(app: &mut MeetApp, m: TransferMsg) {
     }
     for (text, error) in toasts {
         app.toast(text, error);
+    }
+    for p in updated {
+        // 正在編輯同一場時以同步來的為準（原本的內容存成「上一版」，可以還原）
+        if app.dirty.map(|d| d.0) == Some(p.id) {
+            app.dirty = None;
+        }
+        app.upsert(p);
     }
     if keys_synced {
         app.refresh_key_flags();

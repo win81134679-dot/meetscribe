@@ -49,6 +49,9 @@ pub enum Kind {
     File,
     /// API 金鑰（2026-10-31 使用者：「配對後是否可以共享API KEY」）。只在記憶體裡加解密，不落地。
     Keys,
+    /// 會議內容更新：標題、摘要、逐字稿、說話者（2026-10-31 使用者：「手動同步摘要…逐字稿 說話者都同步」）。
+    /// 收件端有同一場會議（同一個會議 ID）才套用，沒有就丟掉。
+    Update,
 }
 
 impl Kind {
@@ -58,6 +61,7 @@ impl Kind {
             Kind::Recording => "錄音",
             Kind::File => "檔案",
             Kind::Keys => "API 金鑰",
+            Kind::Update => "會議內容",
         }
     }
 }
@@ -147,6 +151,24 @@ pub struct Inbox {
     pub peers_changed: bool,
     /// 這次自動收下、存好的 API 金鑰（[`Hub::poll`] 處理，不會出現在 `incoming`）。
     pub keys_synced: Vec<KeysSynced>,
+    /// 別台送來、已經套用的會議內容更新（[`Hub::poll`] 處理；這台沒有那場會議的直接丟掉，不列）。
+    pub meetings_updated: Vec<MeetingUpdated>,
+    /// 我送出的會議內容更新，各台的結果（取代那幾筆的「已收到／拒收」通知）。
+    pub content_results: Vec<ContentResult>,
+}
+
+#[derive(Clone, Debug)]
+pub struct MeetingUpdated {
+    pub peer_name: String,
+    pub project: Project,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ContentResult {
+    pub peer_name: String,
+    pub title: String,
+    /// true：對方有這場會議、已更新；false：對方沒有（或正在處理）。
+    pub applied: bool,
 }
 
 /// 從哪台同步來了哪幾把金鑰（畫面提示用）。
@@ -211,6 +233,46 @@ impl Drop for SecretBytes {
 const KEYS_FILE: &str = "api-keys.json";
 /// 金鑰包裹的大小上限（防呆：真的金鑰才幾百位元組）。
 const KEYS_MAX: u64 = 64 * 1024;
+/// 會議內容更新包裹裡的檔名與大小上限（逐字稿的 JSON，幾小時的會議也才幾 MB）。
+const CONTENT_FILE: &str = "meeting-content.json";
+const CONTENT_MAX: u64 = 16 * 1024 * 1024;
+/// 套用別台的內容前，把這台原本的內容存在會議資料夾的這個檔（「還原上一版」用）。
+const PREVIOUS_CONTENT: &str = "previous-content.json";
+
+/// 會議裡可以編輯、要跟別台同步的內容（不含音訊、處理紀錄、費用）。
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct MeetingContent {
+    pub project_id: Uuid,
+    pub title: String,
+    pub speakers: Vec<crate::model::Speaker>,
+    pub segments: Vec<crate::model::Segment>,
+    pub speakers_reconciled: bool,
+    pub summary: Option<crate::model::Summary>,
+    pub updated_at: DateTime<Local>,
+}
+
+impl MeetingContent {
+    pub fn of(p: &Project) -> Self {
+        Self {
+            project_id: p.id,
+            title: p.title.clone(),
+            speakers: p.speakers.clone(),
+            segments: p.segments.clone(),
+            speakers_reconciled: p.speakers_reconciled,
+            summary: p.summary.clone(),
+            updated_at: p.updated_at,
+        }
+    }
+
+    fn apply(self, p: &mut Project) {
+        p.title = self.title;
+        p.speakers = self.speakers;
+        p.segments = self.segments;
+        p.speakers_reconciled = self.speakers_reconciled;
+        p.summary = self.summary;
+        p.updated_at = Local::now();
+    }
+}
 
 fn key_name(k: crate::secrets::KeyKind) -> &'static str {
     match k {
@@ -239,6 +301,7 @@ impl Outgoing {
         let dir = store.dir(p.id);
         let mut files = Vec::new();
         collect(&dir, &dir, &mut files)?;
+        files.retain(|(_, rel)| rel != PREVIOUS_CONTENT);
         files.sort_by(|a, b| a.1.cmp(&b.1));
         Ok(Self { kind: Kind::Meeting, title: p.title.clone(), project_id: Some(p.id), files, secret: None })
     }
@@ -258,6 +321,17 @@ impl Outgoing {
             project_id: None,
             files: vec![(PathBuf::new(), KEYS_FILE.into())],
             secret: Some(SecretBytes(serde_json::to_vec(&map)?)),
+        })
+    }
+
+    /// 會議內容更新（標題、摘要、逐字稿、說話者），送給有同一場會議的裝置。
+    pub fn meeting_content(p: &Project) -> Result<Self> {
+        Ok(Self {
+            kind: Kind::Update,
+            title: p.title.clone(),
+            project_id: Some(p.id),
+            files: vec![(PathBuf::new(), CONTENT_FILE.into())],
+            secret: Some(SecretBytes(serde_json::to_vec(&MeetingContent::of(p))?)),
         })
     }
 
@@ -587,7 +661,8 @@ impl Transfer {
         }
         let peer_pub = parse_pub(&peer.pubkey)?;
         let (files, sha) = if let Some(secret) = &out.secret {
-            (vec![FileEntry { path: KEYS_FILE.into(), size: total }], hex(&Sha256::digest(secret.as_slice())))
+            let name = out.files.first().map(|(_, rel)| rel.clone()).unwrap_or_else(|| KEYS_FILE.into());
+            (vec![FileEntry { path: name, size: total }], hex(&Sha256::digest(secret.as_slice())))
         } else {
             let files: Vec<FileEntry> = out
                 .files
@@ -702,7 +777,13 @@ impl Transfer {
         let my_pub = self.public_key();
         let key = derive_key_recv(&self.secret, &item.eph, &my_pub)?;
         if item.meta.kind == Kind::Keys {
-            return self.receive_keys(item, &key, peer, staging, progress, cancel).await;
+            let got = self.receive_inline(item, &key, peer, staging, progress, cancel).await?;
+            self.finish(&item.id, "received").await?;
+            return Ok(got);
+        }
+        if item.meta.kind == Kind::Update {
+            // 套用與否由呼叫端決定，之後用 [`Transfer::ack`] 回報（線上那份在回報時刪）
+            return self.receive_inline(item, &key, peer, staging, progress, cancel).await;
         }
         let parts = self.dir.join("incoming").join(&item.id);
         std::fs::create_dir_all(&parts)?;
@@ -755,8 +836,13 @@ impl Transfer {
         Ok(Received { meta: item.meta.clone(), from: peer.id, dir: staging.to_path_buf(), secret: None })
     }
 
-    /// API 金鑰：下載、解密、驗雜湊都在記憶體裡，不寫任何檔。
-    async fn receive_keys(
+    /// 會議內容更新收完後回報：套用了（received）或這台沒有這場會議（declined）；線上那份都會刪。
+    pub async fn ack(&self, item: &Incoming, applied: bool) -> Result<()> {
+        self.finish(&item.id, if applied { "received" } else { "declined" }).await
+    }
+
+    /// API 金鑰、會議內容更新：下載、解密、驗雜湊都在記憶體裡，不寫任何檔。
+    async fn receive_inline(
         &self,
         item: &Incoming,
         key: &[u8; 32],
@@ -766,8 +852,9 @@ impl Transfer {
         cancel: &CancellationToken,
     ) -> Result<Received> {
         let total = item.meta.total;
-        if total > KEYS_MAX || item.meta.files.len() != 1 || item.meta.files[0].path != KEYS_FILE {
-            return Err(Error::Other("金鑰包裹格式不對".into()));
+        let (name, max) = if item.meta.kind == Kind::Keys { (KEYS_FILE, KEYS_MAX) } else { (CONTENT_FILE, CONTENT_MAX) };
+        if total > max || item.meta.files.len() != 1 || item.meta.files[0].path != name {
+            return Err(Error::Other("包裹格式不對".into()));
         }
         progress(0, total);
         let mut plain = SecretBytes::default();
@@ -791,10 +878,9 @@ impl Transfer {
             plain.0.extend_from_slice(part.as_slice());
         }
         if plain.0.len() as u64 != total || hex(&Sha256::digest(plain.as_slice())) != item.meta.sha256 {
-            return Err(Error::Other("金鑰內容的雜湊不符".into()));
+            return Err(Error::Other("內容的雜湊不符".into()));
         }
         progress(total, total);
-        self.finish(&item.id, "received").await?;
         Ok(Received { meta: item.meta.clone(), from: peer.id, dir: staging.to_path_buf(), secret: Some(plain) })
     }
 
@@ -922,6 +1008,41 @@ pub fn place_file(received: &Received, dir: &Path) -> Result<Vec<PathBuf>> {
     }
     let _ = std::fs::remove_dir_all(&received.dir);
     Ok(out)
+}
+
+/// 收到的會議內容套用到這台同一場會議。這台沒有這場會議、或正在處理就回 `None`（不動任何東西）。
+/// 套用前把這台原本的內容存成 `previous-content.json`，可以 [`restore_previous_content`]。
+pub fn apply_meeting_content(store: &ProjectStore, received: &Received) -> Result<Option<Project>> {
+    let bytes = received.secret.as_ref().ok_or_else(|| Error::Other("不是會議內容包裹".into()))?;
+    let content: MeetingContent = serde_json::from_slice(bytes.as_slice()).map_err(|_| Error::Other("會議內容格式不對".into()))?;
+    if Some(content.project_id) != received.meta.project_id || !store.dir(content.project_id).join("project.json").is_file() {
+        return Ok(None);
+    }
+    let mut p = store.load(content.project_id)?;
+    if matches!(p.status, ProjectStatus::Running | ProjectStatus::Queued) {
+        return Ok(None);
+    }
+    crate::store::write_atomic(&store.dir(p.id).join(PREVIOUS_CONTENT), &serde_json::to_vec(&MeetingContent::of(&p))?)?;
+    content.apply(&mut p);
+    store.save(&p)?;
+    Ok(Some(p))
+}
+
+/// 這場會議有沒有「上一版」可以還原（收過別台的內容更新）。
+pub fn has_previous_content(store: &ProjectStore, id: Uuid) -> bool {
+    store.dir(id).join(PREVIOUS_CONTENT).is_file()
+}
+
+/// 還原成收到別台內容之前的樣子（只能還原一次，還原後上一版就刪掉）。
+pub fn restore_previous_content(store: &ProjectStore, id: Uuid) -> Result<Project> {
+    let file = store.dir(id).join(PREVIOUS_CONTENT);
+    let prev: MeetingContent =
+        serde_json::from_slice(&std::fs::read(&file).map_err(|_| Error::Other("沒有可以還原的上一版".into()))?)?;
+    let mut p = store.load(id)?;
+    prev.apply(&mut p);
+    store.save(&p)?;
+    let _ = std::fs::remove_file(&file);
+    Ok(p)
 }
 
 /// 收到的 API 金鑰存進這台的安全位置（電腦：Windows 認證管理員；手機：App 私有空間），回傳存了哪幾把。
@@ -1269,6 +1390,10 @@ pub const PAIR_ATTEMPTS: u32 = 3;
 /// 包一層給介面用：記住最近一次收件匣（收件要用裡面的臨時公鑰）、配對碼錯幾次、名稱有沒有登記過。
 pub struct Hub {
     t: Transfer,
+    /// 會議庫（收別台的會議內容更新要套用）。
+    store: ProjectStore,
+    /// 我送出的會議內容更新：傳送編號 → (對方名稱, 會議標題)，收到對方的回報時換成 [`ContentResult`]。
+    content_sent: std::sync::Mutex<std::collections::HashMap<String, (String, String)>>,
     name: std::sync::Mutex<String>,
     registered: std::sync::Mutex<Option<String>>,
     incoming: std::sync::Mutex<Vec<Incoming>>,
@@ -1281,6 +1406,8 @@ impl Hub {
     pub fn open(app_root: &Path, relay_url: &str, name: &str) -> Result<Self> {
         Ok(Self {
             t: Transfer::open(app_root, relay_url)?,
+            store: ProjectStore::new(app_root.join("projects")),
+            content_sent: Default::default(),
             name: std::sync::Mutex::new(name.trim().to_string()),
             registered: Default::default(),
             incoming: Default::default(),
@@ -1342,6 +1469,48 @@ impl Hub {
                     Err(e) => tracing::warn!("存同步來的金鑰失敗：{e}"),
                 },
                 Err(e) => tracing::warn!("收同步來的金鑰失敗（下次再試）：{e}"),
+            }
+        }
+        // 會議內容更新：有同一場會議就套用，沒有就丟掉（都回報、線上那份都刪）
+        let (updates, rest): (Vec<_>, Vec<_>) = std::mem::take(&mut inbox.incoming).into_iter().partition(|i| i.meta.kind == Kind::Update);
+        inbox.incoming = rest;
+        for item in updates {
+            let none = CancellationToken::new();
+            let got = match self.t.receive(&item, &std::env::temp_dir(), &mut |_, _| {}, &none).await {
+                Ok(got) => got,
+                Err(e) => {
+                    tracing::warn!("收會議內容更新失敗（下次再試）：{e}");
+                    continue;
+                }
+            };
+            let applied = match apply_meeting_content(&self.store, &got) {
+                Ok(p) => p,
+                Err(e) => {
+                    tracing::warn!("套用會議內容更新失敗：{e}");
+                    None
+                }
+            };
+            if let Err(e) = self.t.ack(&item, applied.is_some()).await {
+                tracing::warn!("回報會議內容更新失敗：{e}");
+            }
+            if let Some(project) = applied {
+                inbox.meetings_updated.push(MeetingUpdated { peer_name: item.from_name.clone(), project });
+            }
+        }
+        // 我送出的會議內容更新：對方的「已收到／拒收」換成「已更新／沒有這場會議」
+        {
+            let mut sent = self.content_sent.lock().expect("content_sent");
+            let notices = std::mem::take(&mut inbox.notices);
+            for n in notices {
+                let hit = match &n {
+                    Notice::Received { transfer, .. } => sent.remove(transfer).map(|v| (v, true)),
+                    Notice::Declined { transfer, .. } => sent.remove(transfer).map(|v| (v, false)),
+                    _ => None,
+                };
+                match hit {
+                    Some(((peer_name, title), applied)) => inbox.content_results.push(ContentResult { peer_name, title, applied }),
+                    None => inbox.notices.push(n),
+                }
             }
         }
         // 剛配對完成的裝置（我是接受的那台）：把我的金鑰補給它
@@ -1459,6 +1628,22 @@ impl Hub {
         let r = self.t.receive(&item, staging, progress, cancel).await?;
         self.incoming.lock().expect("incoming").retain(|i| i.id != id);
         Ok(r)
+    }
+
+    /// 把這場會議的內容（標題、摘要、逐字稿、說話者）送給所有配對的裝置；回傳送了幾台。
+    /// 中轉站看不到內容，不知道哪台有這場會議，所以每台都送；沒有的那台收到就丟掉並回報，結果在之後的 [`Inbox::content_results`]。
+    pub async fn sync_meeting(&self, p: &Project) -> Result<usize> {
+        let peers = self.t.peers();
+        if peers.is_empty() {
+            return Ok(0);
+        }
+        self.ensure_registered().await?;
+        let out = Outgoing::meeting_content(p)?;
+        for peer in &peers {
+            let id = self.t.send(peer, &out, &self.name(), &mut |_, _| {}, &CancellationToken::new()).await?;
+            self.content_sent.lock().expect("content_sent").insert(id, (peer.name.clone(), p.title.clone()));
+        }
+        Ok(peers.len())
     }
 
     /// 把這台存著的金鑰送給一台（`Some`）或所有配對的裝置；回傳送了幾台。沒有金鑰就什麼都不做。

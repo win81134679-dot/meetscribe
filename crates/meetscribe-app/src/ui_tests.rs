@@ -216,4 +216,22 @@ fn render_screens() {
         st.transfer.open_send(SendWhat::Meeting(id), "2026-10-30 產品週會".into());
     }
     shot(&mut harness, "17_send_dialog");
+
+    // 摘要頁：同步到其他裝置、收過別台的更新時可以還原上一版
+    std::fs::write(paths.projects_dir().join(id.to_string()).join("previous-content.json"), "{}").unwrap();
+    {
+        let st = harness.state_mut();
+        st.transfer = Default::default();
+        crate::views::transfer::handle(
+            st,
+            TransferMsg::State {
+                enabled: true,
+                device_id: "K7Q2-9XMA".into(),
+                name: "辦公室電腦".into(),
+                peers: vec![peer("HPPT-5ZKF", "Pixel 9")],
+            },
+        );
+        st.project_ui.tab = Tab::Summary;
+    }
+    shot(&mut harness, "18_summary_sync");
 }

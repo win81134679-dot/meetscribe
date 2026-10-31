@@ -79,6 +79,8 @@ data class ProjectDetail(
     val exportFiles: List<String>,
     /** 原始檔是錄音管理裡的錄音（還沒處理完）：刪掉會議後錄音還在。 */
     val keepsRecording: Boolean,
+    /** 收過別台的會議內容更新，可以「還原上一版」。 */
+    val hasPreviousContent: Boolean = false,
 ) {
     val id get() = summary.id
 
@@ -120,6 +122,7 @@ data class ProjectDetail(
                 folder = o.optStringOrNull("folder"),
                 exportFiles = o.optJSONArray("export_files").strings(),
                 keepsRecording = o.optBoolean("keeps_recording"),
+                hasPreviousContent = o.optBoolean("has_previous_content"),
             )
         }
     }

@@ -168,3 +168,67 @@ async fn api_keys_travel_in_memory_only() {
     assert_eq!(secrets::load(KeyKind::Google).unwrap().0, "AIzaSyTEST0000000000000x9y8");
     assert!(b.inbox().await.unwrap().incoming.iter().all(|i| i.id != id), "收完線上馬上刪");
 }
+
+/// 會議內容更新（標題、摘要、逐字稿、說話者）：有同一場會議的裝置自動套用、可還原上一版；沒有的丟掉；寄件端看到各台結果。
+#[tokio::test]
+async fn meeting_content_sync_applies_only_where_the_meeting_exists() {
+    use meetscribe_core::model::Summary;
+    use meetscribe_core::transfer::{Hub, PairResult, has_previous_content, restore_previous_content};
+    let Some(url) = relay() else {
+        eprintln!("略過：沒有設定 MEETSCRIBE_RELAY_TEST");
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    meetscribe_core::secrets::use_file_store(dir.path().join("keys.json"));
+    let a = Hub::open(&dir.path().join("a"), &url, "辦公室電腦").unwrap();
+    let b = Hub::open(&dir.path().join("b"), &url, "我的手機").unwrap();
+    b.poll().await.unwrap();
+    let req = a.pair_start(b.device_id()).await.unwrap();
+    let pr = b.poll().await.unwrap().pair_requests.into_iter().next().expect("B 收到配對請求");
+    b.pair_accept(&pr.id).await.unwrap();
+    assert_eq!(a.pair_confirm(&req, &pr.code).await.unwrap(), PairResult::Paired);
+    b.poll().await.unwrap();
+
+    // 兩台都有同一場會議（像是之前傳過去的）
+    let store_a = ProjectStore::new(dir.path().join("a").join("projects"));
+    let store_b = ProjectStore::new(dir.path().join("b").join("projects"));
+    let mut p = Project::new(dir.path().join("錄音.m4a"), JobOptions::default());
+    p.title = "週會".into();
+    p.status = ProjectStatus::Done;
+    store_a.save(&p).unwrap();
+    store_b.save(&p).unwrap();
+
+    // A 改了標題與摘要，手動同步
+    p.title = "週會（定稿）".into();
+    p.summary = Some(Summary { markdown: "## 決議
+- 改到 11/20".into(), model: "手動".into(), created_at: chrono::Local::now(), instructions: String::new() });
+    store_a.save(&p).unwrap();
+    assert_eq!(a.sync_meeting(&p).await.unwrap(), 1);
+    let inbox = b.poll().await.unwrap();
+    assert!(inbox.incoming.is_empty(), "內容更新自動處理，不進收件詢問");
+    assert_eq!(inbox.meetings_updated.len(), 1);
+    assert_eq!(inbox.meetings_updated[0].peer_name, "辦公室電腦");
+    let got = store_b.load(p.id).unwrap();
+    assert_eq!(got.title, "週會（定稿）");
+    assert!(got.summary.unwrap().markdown.contains("11/20"));
+    let results = a.poll().await.unwrap().content_results;
+    assert_eq!(results.len(), 1);
+    assert!(results[0].applied, "{results:?}");
+
+    // B 還原上一版
+    assert!(has_previous_content(&store_b, p.id));
+    let back = restore_previous_content(&store_b, p.id).unwrap();
+    assert_eq!(back.title, "週會");
+    assert!(back.summary.is_none());
+    assert!(!has_previous_content(&store_b, p.id), "只能還原一次");
+
+    // B 沒有這場會議：丟掉、不動任何東西，A 看到「沒有這場會議」
+    store_b.delete(p.id).unwrap();
+    a.sync_meeting(&p).await.unwrap();
+    let inbox = b.poll().await.unwrap();
+    assert!(inbox.meetings_updated.is_empty() && inbox.incoming.is_empty());
+    assert!(store_b.list().is_empty());
+    let results = a.poll().await.unwrap().content_results;
+    assert_eq!(results.len(), 1);
+    assert!(!results[0].applied);
+}
