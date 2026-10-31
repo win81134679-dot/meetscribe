@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">MeetScribe</string>
+    <string name="app_name">語音轉錄</string>
     <string name="channel_jobs">轉錄進度</string>
 </resources>

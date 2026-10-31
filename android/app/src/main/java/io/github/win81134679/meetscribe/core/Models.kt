@@ -72,6 +72,8 @@ data class ProjectDetail(
     val warnings: List<String>,
     val exported: List<String>,
     val options: JSONObject,
+    /** 這場會議的匯出資料夾（已存在才有）。 */
+    val folder: String?,
 ) {
     val id get() = summary.id
 
@@ -110,6 +112,7 @@ data class ProjectDetail(
                 warnings = o.optJSONArray("warnings").strings(),
                 exported = o.optJSONArray("exported").strings(),
                 options = o.optJSONObject("options") ?: JSONObject(),
+                folder = o.optStringOrNull("folder"),
             )
         }
     }

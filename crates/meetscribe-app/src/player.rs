@@ -63,3 +63,45 @@ impl AudioPlayer {
         self.player.get_pos().as_secs_f64()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use rodio::Source;
+    use std::time::Duration;
+
+    /// 跟隨播放靠「播放到幾秒」：用我們的音訊格式（16 kHz 單聲道 32 kbps MP3）在第 40.0 秒放一聲嗶，
+    /// 從不同位置開始播，量嗶聲實際出現的時間。需要 ffmpeg（同 e2e 測試）。
+    #[test]
+    fn seek_and_position_match_the_audio() {
+        let dir = tempfile::tempdir().unwrap();
+        // 轉錄用的 16 kHz MP3 與播放用的 AAC（m4a）兩種都要準
+        for (name, codec) in [("beep.mp3", ["-ar", "16000", "-b:a", "64k"]), ("beep.m4a", ["-c:a", "aac", "-b:a", "128k"])] {
+        let mp3 = dir.path().join(name);
+        let ok = std::process::Command::new("ffmpeg")
+            .args(["-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "anullsrc=r=16000:cl=mono:d=60", "-f", "lavfi", "-i",
+                   "sine=f=1000:r=16000:d=1", "-filter_complex", "[1]adelay=40000|40000[b];[0][b]amix=inputs=2:duration=first:normalize=0",
+                   "-ac", "1"])
+            .args(codec)
+            .arg(&mp3)
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if !ok {
+            eprintln!("沒有 ffmpeg，略過");
+            return;
+        }
+        // 播放器的位置＝跳轉目標＋之後播了幾個樣本（rodio 的 get_pos），所以要驗的是：解碼器跳到 t 之後，
+        // 拿到的第一個樣本真的是 t 秒的聲音。
+        for seek in [39.0, 12.5, 39.9, 0.0] {
+            let mut d = rodio::Decoder::try_from(std::fs::File::open(&mp3).unwrap()).unwrap();
+            d.try_seek(Duration::from_secs_f64(seek)).unwrap();
+            let rate = d.sample_rate().get() as f64;
+            let channels = d.channels().get() as usize;
+            let n = d.by_ref().position(|s| s.abs() > 0.05).expect("聽得到嗶聲");
+            let onset = seek + (n / channels) as f64 / rate;
+            eprintln!("{name} seek {seek}: 嗶聲在 {onset:.3}s");
+            assert!((onset - 40.0).abs() < 0.1, "{name} 跳到 {seek}s 後嗶聲出現在 {onset:.3}s（應為 40.0）");
+        }
+        }
+    }
+}

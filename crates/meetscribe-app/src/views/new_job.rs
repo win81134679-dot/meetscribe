@@ -162,7 +162,7 @@ fn setup_card(app: &mut MeetApp, ui: &mut egui::Ui) {
         });
         step(ui, 2, "建立 API Key", |ui| {
             ui.label(
-                RichText::new("按「Create Key」，名稱隨意（例如 MeetScribe），建立後複製那串 sk-or-… 金鑰。")
+                RichText::new("按「Create Key」，名稱隨意（例如「語音轉錄」），建立後複製那串 sk-or-… 金鑰。")
                     .color(p.text_muted),
             );
             theme::link_button(

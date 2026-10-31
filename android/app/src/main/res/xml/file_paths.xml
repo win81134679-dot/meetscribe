@@ -1,6 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- 只開放匯出資料夾給「分享／開啟」用；金鑰、專案資料在內部儲存區，不經 FileProvider -->
+<!-- 只開放匯出資料夾給「分享／開啟」用；金鑰、專案資料在內部儲存區，不經 FileProvider。
+     documents：1.1 起匯出到公開的「文件/語音轉錄」（Storage.kt）；exports：寫不進公開資料夾時的退路與 1.0 的舊檔 -->
 <paths>
+    <external-path name="documents" path="Documents/" />
     <external-files-path name="exports" path="exports/" />
     <files-path name="exports_internal" path="exports/" />
 </paths>

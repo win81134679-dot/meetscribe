@@ -1,10 +1,13 @@
-; MeetScribe 安裝程式（Inno Setup 6.3+）
+; 語音轉錄（MeetScribe）安裝程式（Inno Setup 6.3+）
 ; 由 build-installer.ps1 編譯：ISCC /DAppVersion=x.y.z /DReleaseDir=<target\release> MeetScribe.iss
 ; 捷徑交給安裝程式建：未簽章的 exe 自己建 .lnk 容易被防毒判成可疑行為
 ; ffmpeg 不打包（完整版每個 exe 2 百多 MB）；找不到時在最後一頁提供用 winget 安裝，程式會自己去 winget 的位置找
 
-#define AppName "MeetScribe"
-#define ShortcutName "MeetScribe 會議逐字稿"
+; 2026-10-31 使用者：「程式名稱改成語音轉錄」。只改看得到的名稱；安裝資料夾、AppId、檔名維持 MeetScribe，升級才接得上
+#define AppName "語音轉錄"
+#define DirName "MeetScribe"
+#define ShortcutName "語音轉錄"
+#define OldShortcutName "MeetScribe 會議逐字稿"
 #define ExeName "meetscribe-app.exe"
 #define CliName "meetscribe-cli.exe"
 ; 第一次發佈後不能再改：升級與解除安裝靠它找到舊的安裝
@@ -31,7 +34,7 @@ VersionInfoVersion={#AppVersion}
 VersionInfoProductName={#AppName}
 VersionInfoDescription={#AppName} 安裝程式
 ; 只裝給目前帳號：%LOCALAPPDATA%\Programs\MeetScribe，不需要系統管理員
-DefaultDirName={autopf}\{#AppName}
+DefaultDirName={autopf}\{#DirName}
 PrivilegesRequired=lowest
 DisableDirPage=yes
 DisableProgramGroupPage=yes
@@ -48,6 +51,8 @@ WizardStyle=modern
 ; 程式開著時請使用者先關（Restart Manager 會列出來讓他按「自動關閉」）
 CloseApplications=yes
 RestartApplications=no
+; 自動更新（程式用 /VERYSILENT /SELFUPDATE=1 [/RELAUNCH=1] 叫起來，見 crates/meetscribe-app/src/updater.rs）：
+; 程式持有這個 mutex，[Code] 的 InitializeSetup 先等它關掉
 
 [Languages]
 Name: "cht"; MessagesFile: "compiler:Default.isl,ChineseTraditional.isl"
@@ -59,6 +64,11 @@ Name: "desktopicon"; Description: "在桌面建立「{#ShortcutName}」捷徑"; 
 Source: "{#ReleaseDir}\{#ExeName}"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#ReleaseDir}\{#CliName}"; DestDir: "{app}"; Flags: ignoreversion
 
+[InstallDelete]
+; 改名前的捷徑
+Type: files; Name: "{autoprograms}\{#OldShortcutName}.lnk"
+Type: files; Name: "{autodesktop}\{#OldShortcutName}.lnk"
+
 [Icons]
 Name: "{autoprograms}\{#ShortcutName}"; Filename: "{app}\{#ExeName}"; WorkingDir: "{app}"
 Name: "{autodesktop}\{#ShortcutName}"; Filename: "{app}\{#ExeName}"; WorkingDir: "{app}"; Tasks: desktopicon
@@ -68,10 +78,42 @@ Name: "{autodesktop}\{#ShortcutName}"; Filename: "{app}\{#ExeName}"; WorkingDir:
 Filename: "{cmd}"; Parameters: "/c winget install --id Gyan.FFmpeg -e --scope user --accept-source-agreements --accept-package-agreements"; \
   Description: "安裝 ffmpeg（處理音訊必需，用 winget 下載約 100 MB）"; Flags: postinstall waituntilterminated; Check: not FfmpegFound
 Filename: "{app}\{#ExeName}"; Description: "立即啟動 {#ShortcutName}"; Flags: nowait postinstall skipifsilent
+; 自動更新按「立即更新並重新開啟」時（/RELAUNCH=1）：靜默裝完把程式開回來
+Filename: "{app}\{#ExeName}"; Flags: nowait; Check: ShouldRelaunch
 
 ; 會議資料在 %APPDATA%\MeetScribe，解除安裝時保留（金鑰在 Windows 認證管理員，也不動）
 
 [Code]
+const
+  RunningMutex = 'MeetScribe-Running';
+
+function IsSelfUpdate: Boolean;
+begin
+  Result := ExpandConstant('{param:SELFUPDATE|0}') = '1';
+end;
+
+function ShouldRelaunch: Boolean;
+begin
+  Result := IsSelfUpdate and (ExpandConstant('{param:RELAUNCH|0}') = '1');
+end;
+
+// 自動更新：程式剛叫我們起來就自己關掉，最多等 60 秒讓它放開 exe
+function InitializeSetup: Boolean;
+var
+  I: Integer;
+begin
+  Result := True;
+  if IsSelfUpdate then
+  begin
+    I := 0;
+    while CheckForMutexes(RunningMutex) and (I < 120) do
+    begin
+      Sleep(500);
+      I := I + 1;
+    end;
+  end;
+end;
+
 // 跟程式找 ffmpeg 的順序一致（audio::Ffmpeg::locate）：PATH，再來 winget 的套件資料夾
 function HasFfmpegIn(Dir: String): Boolean;
 begin

@@ -126,4 +126,19 @@ fn render_screens() {
         st.project_ui.tab = Tab::Export;
     }
     shot(&mut harness, "12_export_full");
+
+    // 新版已下載好：側欄提示卡＋設定頁「關於與更新」
+    harness.set_size(egui::vec2(1280.0, 3000.0));
+    {
+        let st = harness.state_mut();
+        st.device_id = "K7Q2-9XMA".into();
+        st.update = crate::worker::UpdateStatus::Ready(meetscribe_core::update::Ready {
+            version: "1.2.0".into(),
+            notes: "修正跟隨播放的時間；播放改用高品質音訊".into(),
+            path: "setup.exe".into(),
+            targeted: false,
+        });
+        st.view = View::Settings;
+    }
+    shot(&mut harness, "13_update_ready");
 }

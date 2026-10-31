@@ -4,7 +4,7 @@ use crate::player::AudioPlayer;
 use crate::theme::{self, icon, pal};
 use crate::views::{new_job::NewJobForm, project::ProjectUi, settings::SettingsForm};
 use crate::widgets;
-use crate::worker::{Cmd, Msg, Worker};
+use crate::worker::{Cmd, Msg, UpdateStatus, Worker};
 use chrono::{DateTime, Local};
 use egui::{Margin, RichText, Stroke};
 use meetscribe_core::config::{AppPaths, Settings};
@@ -61,6 +61,14 @@ pub struct MeetApp {
     pub confirm_delete: Option<Uuid>,
     pub has_openrouter_key: bool,
     pub has_google_key: bool,
+    pub update: UpdateStatus,
+    pub device_id: String,
+    /// 已經叫安裝程式起來了（關閉時不要再叫一次）。
+    installing: bool,
+    /// 處理完成時視窗不在前景：讓工作列按鈕閃一下。
+    attention: bool,
+    /// 量螢幕大小的次數（量到後設成 MAX；小螢幕時把視窗縮進來再置中）。
+    fitted: u8,
 }
 
 impl MeetApp {
@@ -84,6 +92,10 @@ impl MeetApp {
             // 新增轉錄頁的帳戶列要顯示餘額
             worker.send(Cmd::TestKey(KeyKind::OpenRouter));
         }
+        let device_id = meetscribe_core::update::device_id(&paths.root);
+        let mut update_state = meetscribe_core::update::UpdateState::load(&paths.root);
+        let updated_from = update_state.note_version(crate::worker::VERSION);
+        let _ = update_state.save(&paths.root);
         let view = View::NewJob;
         let selected = projects.first().map(|p| p.id);
         Self {
@@ -109,7 +121,63 @@ impl MeetApp {
             confirm_delete: None,
             has_openrouter_key,
             has_google_key,
+            update: UpdateStatus::Idle,
+            device_id,
+            installing: false,
+            attention: false,
+            fitted: 0,
         }
+        .with_update_notice(updated_from)
+    }
+
+    fn with_update_notice(mut self, updated_from: Option<String>) -> Self {
+        if let Some(prev) = updated_from {
+            self.toast(format!("已更新到 {}（原本 {prev}）", crate::worker::VERSION), false);
+        }
+        self
+    }
+
+    /// 「立即更新並重新開啟」：靜默安裝、裝完自己開回來。
+    pub fn install_update_now(&mut self, ctx: &egui::Context) {
+        let UpdateStatus::Ready(r) = &self.update else { return };
+        let installer = r.path.clone();
+        if let Some(why) = crate::updater::self_install_blocker() {
+            self.toast(why, true);
+            return;
+        }
+        if !self.busy.is_empty() {
+            self.toast("還有會議在處理，做完再更新（或關閉程式時自動安裝）", true);
+            return;
+        }
+        self.save_now();
+        match crate::updater::launch_installer(&installer, &self.paths.logs_dir(), true) {
+            Ok(()) => {
+                self.installing = true;
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+            Err(e) => self.toast(format!("無法啟動安裝程式：{e}"), true),
+        }
+    }
+
+    /// 螢幕比預設視窗小（例如 1366×768 筆電）：縮到螢幕的九成再置中，標題列才不會跑到螢幕外。
+    fn fit_to_screen(&mut self, ctx: &egui::Context) {
+        if self.fitted > 30 {
+            return;
+        }
+        self.fitted += 1;
+        let (monitor, inner) = ctx.input(|i| (i.viewport().monitor_size, i.viewport().inner_rect));
+        let (Some(m), Some(inner)) = (monitor, inner) else { return };
+        self.fitted = u8::MAX;
+        let max = egui::vec2(m.x * 0.92, m.y * 0.86);
+        if inner.width() <= max.x && inner.height() <= max.y {
+            return;
+        }
+        let size = inner.size().min(max);
+        ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
+        ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(
+            ((m.x - size.x) / 2.0).max(0.0),
+            ((m.y - size.y) / 2.0 - 16.0).max(0.0),
+        )));
     }
 
     pub fn toast(&mut self, text: impl Into<String>, error: bool) {
@@ -208,6 +276,12 @@ impl MeetApp {
                         v.drain(..200);
                     }
                 }
+                Msg::Finished(p) if p.status == ProjectStatus::Done => {
+                    self.attention = true;
+                    if self.dirty.map(|d| d.0) != Some(p.id) {
+                        self.upsert(*p);
+                    }
+                }
                 Msg::Pipeline(Event::Updated(p)) | Msg::Finished(p) => {
                     // 使用者正在編輯同一個專案時不要被背景結果蓋掉（只在背景沒在跑時才可能編輯）
                     if self.dirty.map(|d| d.0) != Some(p.id) {
@@ -222,7 +296,44 @@ impl MeetApp {
                 Msg::GoogleModels(r) => self.settings_form.google_models(r),
                 Msg::Durations(d) => self.new_job.durations(d),
                 Msg::Ffmpeg(r) => self.settings_form.ffmpeg_result(r),
+                Msg::Update { status, manual } => {
+                    match (&status, manual) {
+                        (UpdateStatus::Latest, true) => {
+                            self.toast(format!("目前已是最新版：{}", crate::worker::VERSION), false)
+                        }
+                        (UpdateStatus::Failed(e), true) => self.toast(format!("檢查更新失敗：{e}"), true),
+                        (UpdateStatus::Ready(r), _) if self.update != status => {
+                            self.toast(format!("新版 {} 已下載好，關閉程式時會自動安裝", r.version), false)
+                        }
+                        _ => {}
+                    }
+                    self.update = status;
+                }
             }
+        }
+    }
+
+    /// 新版已下載好：側欄頂端一張小卡，一鍵更新。
+    fn update_banner(&mut self, ui: &mut egui::Ui) {
+        let UpdateStatus::Ready(r) = &self.update else { return };
+        let p = pal(ui);
+        let version = r.version.clone();
+        let mut now = false;
+        egui::Frame::NONE
+            .fill(p.accent_faint)
+            .corner_radius(theme::RADIUS_SMALL)
+            .inner_margin(Margin::symmetric(12, 10))
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.label(theme::bold(format!("新版 {version} 已備妥"), 13.0).color(p.accent_strong));
+                ui.label(RichText::new("關閉程式時會自動安裝").size(12.0).color(p.text_muted));
+                ui.add_space(4.0);
+                now = theme::button(ui, Some(icon::DOWNLOAD), "立即更新").clicked();
+            });
+        ui.add_space(12.0);
+        if now {
+            let ctx = ui.ctx().clone();
+            self.install_update_now(&ctx);
         }
     }
 
@@ -242,7 +353,7 @@ impl MeetApp {
             );
             ui.vertical(|ui| {
                 ui.spacing_mut().item_spacing.y = 0.0;
-                ui.label(theme::bold("MeetScribe", 18.0));
+                ui.label(theme::bold("語音轉錄", 18.0));
                 ui.label(
                     RichText::new("錄音進來，逐字稿與摘要出去。")
                         .size(12.0)
@@ -251,6 +362,7 @@ impl MeetApp {
             });
         });
         ui.add_space(18.0);
+        self.update_banner(ui);
 
         if theme::nav_item(ui, icon::ADD, "新增轉錄", self.view == View::NewJob).clicked() {
             self.save_now();
@@ -502,7 +614,13 @@ impl MeetApp {
 impl eframe::App for MeetApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        self.fit_to_screen(&ctx);
         self.drain_worker();
+        if std::mem::take(&mut self.attention) && !ctx.input(|i| i.viewport().focused.unwrap_or(true)) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(
+                egui::UserAttentionType::Informational,
+            ));
+        }
         // 編輯停 1 秒後自動存檔
         if let Some((_, at)) = self.dirty {
             if at.elapsed() > Duration::from_secs(1) {
@@ -568,5 +686,14 @@ impl eframe::App for MeetApp {
 
     fn on_exit(&mut self) {
         self.save_now();
+        // 新版下載好、開著自動更新：關閉時靜默裝好（不重開）
+        if !self.installing
+            && self.settings.auto_update
+            && crate::updater::self_install_blocker().is_none()
+            && let UpdateStatus::Ready(r) = &self.update
+            && let Err(e) = crate::updater::launch_installer(&r.path, &self.paths.logs_dir(), false)
+        {
+            tracing::warn!("關閉時安裝新版失敗：{e}");
+        }
     }
 }

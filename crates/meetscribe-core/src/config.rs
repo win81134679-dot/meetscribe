@@ -89,7 +89,18 @@ pub struct Settings {
     pub export: ExportOptions,
     /// 介面字級倍率。
     pub ui_scale: f32,
+    /// 有新版時自動下載並安裝（電腦：閒置或關閉程式時；手機：下載好後提示一鍵安裝）。
+    pub auto_update: bool,
+    /// 檢查新版的 GitHub API 位址；空白＝api.github.com（測試接模擬伺服器用，介面上沒有）。
+    pub update_api: String,
+    /// 設定檔格式版本，見 [`SETTINGS_SCHEMA`]。舊檔沒有這欄＝0。
+    #[serde(default)]
+    pub schema: u32,
 }
+
+/// 2：匯出預設改成「每場會議一個子資料夾」（2026-10-31 使用者：「會議預設開啟每場會議子資料夾」），
+/// 舊設定檔（存的是當時的預設 false）載入時改開一次，之後使用者自己關掉就尊重。
+pub const SETTINGS_SCHEMA: u32 = 2;
 
 impl Default for Settings {
     fn default() -> Self {
@@ -113,6 +124,9 @@ impl Default for Settings {
             ffmpeg_path: String::new(),
             export: ExportOptions::default(),
             ui_scale: 1.0,
+            auto_update: true,
+            update_api: String::new(),
+            schema: SETTINGS_SCHEMA,
         }
     }
 }
@@ -159,11 +173,28 @@ impl Settings {
     }
 
     pub fn load(paths: &AppPaths) -> Self {
-        std::fs::read_to_string(paths.settings_file())
+        let Some(mut s) = std::fs::read_to_string(paths.settings_file())
             .ok()
             .and_then(|s| serde_json::from_str::<Settings>(&s).ok())
-            .unwrap_or_default()
-            .sanitized()
+        else {
+            return Settings::default();
+        };
+        if s.migrate() {
+            let _ = s.save(paths);
+        }
+        s.sanitized()
+    }
+
+    /// 把舊格式的設定升到 [`SETTINGS_SCHEMA`]；有改就回 true（呼叫端存檔）。
+    pub fn migrate(&mut self) -> bool {
+        if self.schema >= SETTINGS_SCHEMA {
+            return false;
+        }
+        if self.schema < 2 {
+            self.export.subfolder = true;
+        }
+        self.schema = SETTINGS_SCHEMA;
+        true
     }
 
     pub fn save(&self, paths: &AppPaths) -> Result<()> {
@@ -246,6 +277,22 @@ mod tests {
         let s: Settings = serde_json::from_str(r#"{"chunk_minutes": 15}"#).unwrap();
         assert_eq!(s.chunk_minutes, 15);
         assert_eq!(s.stt_model, DEFAULT_STT_MODEL);
+    }
+
+    #[test]
+    fn old_settings_turn_on_meeting_subfolders_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = AppPaths::at(dir.path().to_path_buf());
+        paths.ensure().unwrap();
+        assert!(Settings::default().export.subfolder);
+        std::fs::write(paths.settings_file(), r#"{"export": {"subfolder": false}}"#).unwrap();
+        let s = Settings::load(&paths);
+        assert!(s.export.subfolder);
+        assert_eq!(s.schema, SETTINGS_SCHEMA);
+        // 之後使用者自己關掉：不再改回來
+        let s = Settings { export: crate::export::ExportOptions { subfolder: false, ..s.export }, ..s };
+        s.save(&paths).unwrap();
+        assert!(!Settings::load(&paths).export.subfolder);
     }
 
     #[test]

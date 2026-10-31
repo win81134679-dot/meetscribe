@@ -8,6 +8,7 @@ use meetscribe_core::model::{Project, ProjectStatus};
 use meetscribe_core::openrouter::{ModelInfo, OpenRouter, SttCapabilities};
 use meetscribe_core::pipeline::{Engine, Event, EventSink};
 use meetscribe_core::secrets::{ApiKeys, KeyKind};
+use meetscribe_core::update::{self, Outcome, Platform, Ready, UpdateState};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, mpsc};
@@ -26,6 +27,20 @@ pub enum Cmd {
     LoadGoogleModels,
     Probe(Vec<PathBuf>),
     CheckFfmpeg(String),
+    /// 檢查新版（`manual`：使用者按的，結果要明講，包括「已是最新版」）。
+    CheckUpdate { manual: bool },
+}
+
+/// 更新的狀態（設定頁「關於與更新」與側欄提示用）。
+#[derive(Clone, Debug, Default, PartialEq)]
+pub enum UpdateStatus {
+    #[default]
+    Idle,
+    Checking,
+    Downloading { version: String, done: u64, total: u64 },
+    Latest,
+    Ready(Ready),
+    Failed(String),
 }
 
 pub enum Msg {
@@ -46,6 +61,7 @@ pub enum Msg {
     Ffmpeg(Result<String, String>),
     /// 排隊中、正在跑的專案 ID（UI 用來顯示狀態與停用編輯）。
     Busy(Vec<Uuid>),
+    Update { status: UpdateStatus, manual: bool },
 }
 
 pub struct Worker {
@@ -115,6 +131,8 @@ impl Worker {
                     let (job_tx, job_rx) = tmpsc::unbounded_channel::<Job>();
                     tokio::spawn(job_runner(shared.clone(), job_rx));
                     tokio::spawn(fetch_stt_caps(shared.clone()));
+                    tokio::spawn(auto_update(shared.clone()));
+                    tokio::spawn(upgrade_projects(shared.clone()));
                     while let Some(cmd) = cmd_rx.recv().await {
                         handle(&shared, &job_tx, cmd);
                     }
@@ -228,6 +246,10 @@ fn handle(shared: &Arc<Shared>, job_tx: &tmpsc::UnboundedSender<Job>, cmd: Cmd) 
                 shared.send(Msg::Durations(out));
             });
         }
+        Cmd::CheckUpdate { manual } => {
+            let shared = shared.clone();
+            tokio::spawn(async move { check_update(&shared, manual).await });
+        }
         Cmd::CheckFfmpeg(path) => {
             let shared = shared.clone();
             tokio::spawn(async move {
@@ -317,5 +339,85 @@ async fn fetch_stt_caps(shared: Arc<Shared>) {
         && let Ok(caps) = c.stt_capabilities(&s.stt_model).await
     {
         shared.send(Msg::SttCaps(caps));
+    }
+}
+
+/// 程式版本（安裝檔、update.json 都用這個）。
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// 啟動 15 秒後、之後每小時看一次：開著自動更新且距上次檢查滿 20 小時就檢查並下載。
+/// 已經下載好的版本一開程式就告訴 UI（側欄提示「新版已備妥」）。
+async fn auto_update(shared: Arc<Shared>) {
+    if let Some(r) = UpdateState::load(&shared.paths.root).ready_for(VERSION) {
+        shared.send(Msg::Update { status: UpdateStatus::Ready(r.clone()), manual: false });
+    }
+    tokio::time::sleep(std::time::Duration::from_secs(15)).await;
+    loop {
+        if shared.settings().auto_update && UpdateState::load(&shared.paths.root).due(20) {
+            check_update(&shared, false).await;
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+    }
+}
+
+static CHECKING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+async fn check_update(shared: &Arc<Shared>, manual: bool) {
+    use std::sync::atomic::Ordering;
+    if CHECKING.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    shared.send(Msg::Update { status: UpdateStatus::Checking, manual });
+    let mut last_sent = std::time::Instant::now() - std::time::Duration::from_secs(1);
+    let progress_shared = shared.clone();
+    let mut progress = move |version: &str, done: u64, total: u64| {
+        if last_sent.elapsed().as_millis() >= 250 || done == total {
+            last_sent = std::time::Instant::now();
+            progress_shared.send(Msg::Update {
+                status: UpdateStatus::Downloading { version: version.into(), done, total },
+                manual,
+            });
+        }
+    };
+    let settings = shared.settings();
+    let result = update::check_and_download(
+        &shared.paths.root,
+        &settings,
+        VERSION,
+        Platform::Windows,
+        &CancellationToken::new(),
+        &mut progress,
+    )
+    .await;
+    let status = match result {
+        Ok(Outcome::Latest) => UpdateStatus::Latest,
+        Ok(Outcome::Ready(r)) => UpdateStatus::Ready(r),
+        Err(e) => {
+            tracing::warn!("檢查更新失敗：{e}");
+            UpdateStatus::Failed(e.to_string())
+        }
+    };
+    shared.send(Msg::Update { status, manual });
+    CHECKING.store(false, Ordering::SeqCst);
+}
+
+/// 1.1 之前處理的會議升級一次（不呼叫 API）：重新對齊每句的時間（跟隨播放）、補做高品質播放音訊。
+/// 啟動 3 秒後在背景一場一場做，正在排隊的跳過；做完的發 Updated 讓畫面換新。
+async fn upgrade_projects(shared: Arc<Shared>) {
+    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+    let Ok(audio) = meetscribe_core::audio::AudioTool::locate(&shared.settings().ffmpeg_path) else { return };
+    let store = meetscribe_core::store::ProjectStore::new(shared.paths.projects_dir());
+    let cancel = CancellationToken::new();
+    for mut p in store.list() {
+        if p.segments.is_empty() || shared.queue.lock().expect("queue").contains(&p.id) {
+            continue;
+        }
+        let dir = store.dir(p.id);
+        let retimed = meetscribe_core::pipeline::retime_project(&audio, &dir, &mut p, &cancel).await.unwrap_or(false);
+        let playback = meetscribe_core::pipeline::ensure_playback(&audio, &dir, &mut p, &cancel).await.unwrap_or(false);
+        if (retimed || playback) && store.save(&p).is_ok() {
+            tracing::info!("升級「{}」：重新對齊時間 {retimed}、高品質播放音訊 {playback}", p.title);
+            shared.send(Msg::Pipeline(Event::Updated(Box::new(p))));
+        }
     }
 }

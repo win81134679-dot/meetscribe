@@ -183,7 +183,7 @@ async fn full_pipeline_with_two_chunks() {
     assert_eq!(done.models.attribution, "gemini-3.8-flash");
     assert!(done.usage.llm_input_tokens >= 10_000, "Gemini 的 token 有記到");
 
-    // 完成時依專案的輸出選項自動匯出到錄音檔旁邊
+    // 完成時依專案的輸出選項自動匯出到錄音檔旁邊、這場會議自己的子資料夾（預設）
     let names: Vec<String> = done
         .exported
         .iter()
@@ -193,7 +193,8 @@ async fn full_pipeline_with_two_chunks() {
         names,
         ["預算會議 摘要.md", "預算會議 逐字稿.md", "預算會議 摘要.txt", "預算會議 逐字稿.txt"]
     );
-    assert!(done.exported.iter().all(|f| f.parent() == Some(tmp.path()) && f.is_file()));
+    let folder = tmp.path().join("預算會議");
+    assert!(done.exported.iter().all(|f| f.parent() == Some(folder.as_path()) && f.is_file()));
 
     // 存檔可重新讀回，並可匯出所有格式
     let reloaded = engine.store.load(done.id).unwrap();
@@ -218,7 +219,7 @@ async fn full_pipeline_with_two_chunks() {
     assert!(ev.iter().any(|e| matches!(e, Event::Progress { .. })));
 }
 
-/// 請求本文比 `0` 位元組長才算符合（用來分辨送出的音訊有多長：32 kbps、base64 約每秒 5.3 KB）。
+/// 請求本文比 `0` 位元組長才算符合（用來分辨送出的音訊有多長：64 kbps、base64 約每秒 10.7 KB）。
 struct BodyLongerThan(usize);
 
 impl wiremock::Match for BodyLongerThan {
@@ -328,7 +329,7 @@ async fn failed_chunk_keeps_finished_ones() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/audio/transcriptions"))
-        .and(BodyLongerThan(800_000))
+        .and(BodyLongerThan(1_600_000))
         .respond_with(ResponseTemplate::new(402).set_body_json(serde_json::json!({
             "error": { "code": 402, "message": "Insufficient credits" }
         })))
@@ -495,4 +496,64 @@ async fn full_pipeline_with_native_audio_backend() {
     assert!(done.summary.is_some());
     assert_eq!(done.exported.len(), 2);
     assert!(done.exported.iter().all(|f| f.starts_with(tmp.path().join("exports")) && f.is_file()));
+}
+
+/// 2026-10-31「跟隨播放根本不準」：真實會議的兩種壞時間——模型回的假等差秒數（0,1,2…）、供應商 300 秒一整段——
+/// 由 retime_project 重新對齊；句子開頭不落在靜音裡。順便測 1.1 之前的專案補做高品質播放音訊。
+#[tokio::test(flavor = "multi_thread")]
+async fn retime_fixes_fake_model_times_and_provider_blocks() {
+    use meetscribe_core::audio::AudioTool;
+    use meetscribe_core::model::{ChunkRecord, Segment};
+    let Ok(ffmpeg) = Ffmpeg::locate("") else { return };
+    let tmp = tempfile::tempdir().unwrap();
+    let source = tmp.path().join("會議.wav");
+    make_audio(&ffmpeg, &source).await;
+    let dir = tmp.path().join("proj");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::copy(&source, dir.join("audio.wav")).unwrap();
+
+    let make = |segments: Vec<Segment>| {
+        let mut p = Project::new(source.clone(), JobOptions::default());
+        p.timing_rev = 0;
+        p.duration = 300.0;
+        p.audio_file = Some("audio.wav".into());
+        p.chunks = vec![ChunkRecord { index: 0, start: 0.0, end: 300.0, file: "c.mp3".into(), stt: None, attributed: true }];
+        p.segments = segments;
+        p
+    };
+    let seg = |id: u64, start: f64, end: f64, timing: Timing, text: String| Segment {
+        id, start, end, timing, speaker: Some("S1".into()), text, chunk: 0, edited: id == 3,
+    };
+    let sentence = |i: usize| format!("第{i}句話大家討論預算與人力安排。");
+    let audio = AudioTool::Ffmpeg(ffmpeg.clone());
+    let cancel = CancellationToken::new();
+    let in_silence = |t: f64| (115.3..117.7).contains(&t) || (235.3..237.7).contains(&t);
+
+    // 模型回 0,1,2…29：整段字被擠在前 30 秒
+    let fake: Vec<Segment> = (0..30).map(|i| seg(i as u64 + 1, i as f64, i as f64 + 1.0, Timing::Model, sentence(i))).collect();
+    let mut p = make(fake);
+    assert!(meetscribe_core::pipeline::retime_project(&audio, &dir, &mut p, &cancel).await.unwrap());
+    assert_eq!(p.segments.len(), 30, "句子不增不減");
+    assert!(p.segments.iter().all(|s| s.timing == Timing::Estimated));
+    assert!(p.segments[28].start > 250.0, "最後幾句應在段落尾端，實際 {:.1}", p.segments[28].start);
+    assert!(p.segments.iter().all(|s| !in_silence(s.start)), "句子開頭不落在靜音裡");
+    assert!(p.segments.iter().any(|s| s.edited), "使用者改過的標記留著");
+    assert!(!meetscribe_core::pipeline::retime_project(&audio, &dir, &mut p, &cancel).await.unwrap(), "只做一次");
+
+    // 供應商 300 秒一整段
+    let block: String = (0..40).map(sentence).collect();
+    let mut p = make(vec![seg(1, 0.0, 300.0, Timing::Provider, block)]);
+    assert!(meetscribe_core::pipeline::retime_project(&audio, &dir, &mut p, &cancel).await.unwrap());
+    assert!(p.segments.len() >= 10, "切成句子，實際 {} 句", p.segments.len());
+    assert!(p.segments.iter().all(|s| s.end - s.start <= 45.0));
+    assert!(p.segments.iter().all(|s| !in_silence(s.start)));
+    let ids: std::collections::HashSet<u64> = p.segments.iter().map(|s| s.id).collect();
+    assert_eq!(ids.len(), p.segments.len(), "句子編號不重複");
+
+    // 高品質播放音訊（AAC）
+    assert!(meetscribe_core::pipeline::ensure_playback(&audio, &dir, &mut p, &cancel).await.unwrap());
+    let playback = dir.join(p.playback_audio().unwrap());
+    assert_eq!(playback.extension().unwrap(), "m4a");
+    let d = ffmpeg.probe_duration(&playback).await.unwrap();
+    assert!((d - 300.0).abs() < 1.0, "{d}");
 }

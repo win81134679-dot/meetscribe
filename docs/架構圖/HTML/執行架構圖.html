@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>MeetScribe 執行架構圖</title>
+  <title>語音轉錄 執行架構圖</title>
   <link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500;600&family=Noto+Sans+TC:wght@400;500;600&family=Noto+Serif+TC:wght@400&display=swap" rel="stylesheet">
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -26,8 +26,8 @@
 <body>
 <div class="diagram-container">
 <svg viewBox="0 0 1280 904" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="ms-arch-title ms-arch-desc">
-<title id="ms-arch-title">MeetScribe 執行架構圖</title>
-<desc id="ms-arch-desc">使用者把錄音拖進 MeetScribe 桌面程式，或在 Android App 選擇、分享錄音；兩邊共用同一個 Rust 處理核心，在本機轉檔切段（電腦用 ffmpeg，手機用內建解碼與 MP3 編碼）、存專案資料；逐字稿送 OpenRouter 上付費的 Nemotron 3.5 Transcribe，說話者分配、整合與摘要預設用 Google AI Studio 的 Gemini 免費額度，沒有 Google Key 時改用 OpenRouter 免費模型，摘要在電腦版也可手動改用本機 Claude Code CLI。</desc>
+<title id="ms-arch-title">語音轉錄 執行架構圖</title>
+<desc id="ms-arch-desc">使用者把錄音拖進語音轉錄桌面程式，或在 Android App 選擇、分享錄音；兩邊共用同一個 Rust 處理核心，在本機轉檔切段（電腦用 ffmpeg，手機用內建解碼與 MP3 編碼）、存專案資料；逐字稿送 OpenRouter 上付費的 Nemotron 3.5 Transcribe，說話者分配、整合與摘要預設用 Google AI Studio 的 Gemini 免費額度，沒有 Google Key 時改用 OpenRouter 免費模型，摘要在電腦版也可手動改用本機 Claude Code CLI。</desc>
 <defs>
 <marker id="ms-arch-arr-in" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#2196f3"/></marker>
 <marker id="ms-arch-arr-proc" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#3949ab"/></marker>
@@ -36,7 +36,7 @@
 
 <!-- 背景與標題 -->
 <rect width="100%" height="100%" fill="#f4f7fb"/>
-<text x="40" y="56" class="t-eyebrow" fill="#44506b">架構圖 · MeetScribe 會議逐字稿（Rust 桌面程式＋ Android App，共用核心）</text>
+<text x="40" y="56" class="t-eyebrow" fill="#44506b">架構圖 · 語音轉錄（Rust 桌面程式＋ Android App，共用核心，推送更新）</text>
 <text x="40" y="112" class="t-title" fill="#14213d">只有逐字稿這一步付費，說話者與摘要走免費模型</text>
 
 <!-- 區塊（最先畫） -->
@@ -80,7 +80,7 @@
 <rect x="320" y="216" width="224" height="104" rx="6" fill="#c7cde8" stroke="#3949ab" stroke-width="1.2"/>
 <rect x="328" y="222" width="28" height="12" rx="2" fill="none" stroke="#3949ab" stroke-opacity="0.6" stroke-width="0.8"/>
 <text x="342" y="231" class="t-tag" fill="#3949ab" text-anchor="middle">APP</text>
-<text x="432" y="258" class="t-name" fill="#14213d" text-anchor="middle">MeetScribe 電腦＋手機</text>
+<text x="432" y="258" class="t-name" fill="#14213d" text-anchor="middle">語音轉錄 電腦＋手機</text>
 <text x="432" y="280" class="t-mono" fill="#44506b" text-anchor="middle">egui ／ Kotlin+Compose</text>
 <text x="432" y="300" class="t-sub" fill="#44506b" text-anchor="middle">手機經 JNI 用同一核心；另有 CLI</text>
 
@@ -101,6 +101,15 @@
 <text x="720" y="446" class="t-name" fill="#14213d" text-anchor="middle">ffmpeg ／ 內建音訊</text>
 <text x="720" y="466" class="t-mono" fill="#44506b" text-anchor="middle">16 kHz mono · symphonia+LAME</text>
 <text x="720" y="484" class="t-sub" fill="#44506b" text-anchor="middle">轉檔、在停頓處切段（手機用內建）</text>
+
+<!-- 節點：自動更新（外部，灰藍）：GitHub Releases 的新版，驗簽章後安裝 -->
+<rect x="600" y="560" width="240" height="88" rx="6" fill="#f4f7fb"/>
+<rect x="600" y="560" width="240" height="88" rx="6" fill="#d6dee4" stroke="#78909c" stroke-width="1.2"/>
+<rect x="608" y="566" width="28" height="12" rx="2" fill="none" stroke="#78909c" stroke-opacity="0.6" stroke-width="0.8"/>
+<text x="622" y="575" class="t-tag" fill="#4f5f67" text-anchor="middle">UPD</text>
+<text x="720" y="598" class="t-name" fill="#14213d" text-anchor="middle">自動更新</text>
+<text x="720" y="618" class="t-mono" fill="#44506b" text-anchor="middle">GitHub Releases · ECDSA 簽章</text>
+<text x="720" y="636" class="t-sub" fill="#44506b" text-anchor="middle">每台有識別碼，可只推給指定裝置</text>
 
 <!-- 節點：本機資料（儲存，青） -->
 <rect x="320" y="408" width="224" height="88" rx="6" fill="#f4f7fb"/>
@@ -160,7 +169,7 @@
 <rect x="246" y="786" width="14" height="10" rx="2" fill="#c1e0f9" stroke="#2196f3" stroke-width="1"/>
 <text x="268" y="796" class="t-sub" fill="#44506b">使用者</text>
 <rect x="326" y="786" width="14" height="10" rx="2" fill="#c7cde8" stroke="#3949ab" stroke-width="1"/>
-<text x="348" y="796" class="t-sub" fill="#44506b">MeetScribe 程式</text>
+<text x="348" y="796" class="t-sub" fill="#44506b">語音轉錄程式</text>
 <rect x="464" y="786" width="14" height="10" rx="2" fill="#dcc4e8" stroke="#8e24aa" stroke-width="1"/>
 <text x="486" y="796" class="t-sub" fill="#44506b">免費 AI 模型</text>
 <rect x="582" y="786" width="14" height="10" rx="2" fill="#f6eaca" stroke="#d8a527" stroke-width="1" stroke-dasharray="3,2"/>

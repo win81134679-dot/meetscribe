@@ -6,6 +6,7 @@ mod player;
 mod theme;
 #[cfg(test)]
 mod ui_tests;
+mod updater;
 mod views;
 mod widgets;
 mod worker;
@@ -18,18 +19,21 @@ fn main() -> eframe::Result<()> {
         eprintln!("無法建立程式資料夾 {}：{e}", paths.root.display());
     }
     init_logging(&paths);
+    updater::hold_running_mutex();
     tracing::info!(
-        "MeetScribe {} 啟動，資料夾 {}",
+        "語音轉錄 {} 啟動，資料夾 {}",
         env!("CARGO_PKG_VERSION"),
         paths.root.display()
     );
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title("MeetScribe 會議逐字稿")
+            .with_title("語音轉錄")
             .with_inner_size([1280.0, 820.0])
             .with_min_inner_size([900.0, 600.0])
             .with_drag_and_drop(true),
+        // 每次開都在螢幕正中間（2026-10-31 使用者：「預設開啟程式UI置中」）；螢幕比視窗小時 app.rs 第一個畫面再縮
+        centered: true,
         ..Default::default()
     };
     eframe::run_native(

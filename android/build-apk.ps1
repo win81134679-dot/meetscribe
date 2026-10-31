@@ -1,12 +1,13 @@
 ﻿# 建置 Android 正式版 APK：Rust 交叉編譯 → Gradle assembleRelease → 簽章檢查 → dist\MeetScribe-Android-v<版本>.apk
 # 用法：powershell -ExecutionPolicy Bypass -File android\build-apk.ps1 [-Debug] [-Abis arm64-v8a,x86_64]
 # -Abis 加 x86_64 是給電腦上的模擬器測試；發佈版只要 arm64-v8a（預設）。
+# -TestVersion 1.1.1：只改 APK 的版本號（程式一樣），測自動更新用；產出檔名帶 -test。
 #
 # AGP 拒絕在含中文的路徑建置（aapt2、NDK 工具真的會壞），所以整個建置在 subst 掛出來的英數磁碟代號下跑，
 # 結束就 subst /D（只拿掉代號，不動檔案）。簽章用 android\keystore.properties（不進版控，見 README）。
 # 這支只編譯，不安裝、不執行 App。
 
-param([switch]$Debug, [string]$Abis = 'arm64-v8a')
+param([switch]$Debug, [string]$Abis = 'arm64-v8a', [string]$TestVersion = '')
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 
@@ -33,7 +34,9 @@ try {
     try {
         $task = if ($Debug) { 'assembleDebug' } else { 'assembleRelease' }
         # 不留常駐 daemon：這台記憶體吃緊，而且 daemon 會一直佔住輸出管線，讓呼叫端等不到結束
-        & .\gradlew.bat $task --console=plain --no-daemon "-Pmeetscribe.abis=$Abis"
+        [string[]]$gradleArgs = @($task, '--console=plain', '--no-daemon', "-Pmeetscribe.abis=$Abis")
+        if ($TestVersion) { $gradleArgs += "-Pmeetscribe.version=$TestVersion" }
+        & .\gradlew.bat @gradleArgs
         if ($LASTEXITCODE) { throw "Gradle $task 失敗" }
     } finally { Pop-Location }
 } finally {
@@ -41,6 +44,7 @@ try {
 }
 
 $version = (Select-String -Path (Join-Path $root 'Cargo.toml') -Pattern '^version = "(.+)"').Matches[0].Groups[1].Value
+if ($TestVersion) { $version = "$TestVersion-test" }
 $variant = if ($Debug) { 'debug' } else { 'release' }
 $built = Get-ChildItem (Join-Path $PSScriptRoot "app\build\outputs\apk\$variant") -Filter *.apk | Select-Object -First 1
 if (-not $built) { throw '找不到產出的 APK' }

@@ -31,6 +31,7 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import io.github.win81134679.meetscribe.core.Repo
+import io.github.win81134679.meetscribe.core.Storage
 import io.github.win81134679.meetscribe.core.strings
 import kotlinx.coroutines.launch
 import org.json.JSONArray
@@ -113,10 +114,11 @@ fun SettingsScreen() {
 
         ExportDefaults(settings) { ex -> save { put("export", ex) } }
 
-        SectionCard("關於") {
+        AboutUpdateCard(settings.optBoolean("auto_update", true)) { v -> save { put("auto_update", v) } }
+
+        SectionCard("資料") {
             val pal = Pal.current
-            Text("MeetScribe ${Repo.version}（Android）", style = MaterialTheme.typography.bodyMedium)
-            Text("匯出資料夾：${Repo.exportsDir.absolutePath}", color = pal.textMuted, style = MaterialTheme.typography.bodySmall)
+            Text("匯出資料夾：${Storage.displayPath(Repo.exportsDir)}", style = MaterialTheme.typography.bodyMedium)
             Text(
                 "提示詞可在電腦版自訂；手機版使用內建提示詞。",
                 color = pal.textMuted, style = MaterialTheme.typography.bodySmall,
@@ -195,7 +197,7 @@ private fun ExportDefaults(settings: JSONObject, onChange: (JSONObject) -> Unit)
         }
         SelectRow("內容", Repo.contents.map { it.id to it.label }, ex.optString("content", "Both")) { v -> put { put("content", v) } }
         SelectRow("檔名", Repo.filenamePresets.map { it to it }, ex.optString("filename", "{標題}")) { v -> put { put("filename", v) } }
-        SwitchRow("每場會議一個子資料夾", ex.optBoolean("subfolder")) { v -> put { put("subfolder", v) } }
+        SwitchRow("每場會議一個子資料夾", ex.optBoolean("subfolder", true), "資料夾名稱同檔名，一場會議的檔案放在一起") { v -> put { put("subfolder", v) } }
         SwitchRow("時間戳記", ex.optBoolean("timestamps", true)) { v -> put { put("timestamps", v) } }
         SwitchRow("標出說話者", ex.optBoolean("speaker_names", true)) { v -> put { put("speaker_names", v) } }
         SwitchRow("同一人連續發言併成一段", ex.optBoolean("merge_turns", true)) { v -> put { put("merge_turns", v) } }

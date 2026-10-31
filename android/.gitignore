@@ -11,3 +11,6 @@ app/src/main/jniLibs/
 # 簽章金鑰與密碼：絕不進版控（遺失就無法再發佈同一個 App 的更新）
 keystore/
 keystore.properties
+# JVM 當掉時留下的記錄（含本機路徑與環境變數）
+hs_err_pid*.log
+replay_pid*.log

@@ -33,11 +33,14 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.core.content.IntentCompat
+import io.github.win81134679.meetscribe.core.Notifier
 import io.github.win81134679.meetscribe.core.Repo
 
 class MainActivity : ComponentActivity() {
     /** 從其他 App 分享進來、還沒匯入的錄音。 */
     private var incoming by mutableStateOf<Uri?>(null)
+    /** 從通知點進來：要打開的會議，或 "settings"。 */
+    private var jump by mutableStateOf<String?>(null)
 
     private val askNotifications = registerForActivityResult(ActivityResultContracts.RequestPermission()) {}
 
@@ -46,6 +49,7 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         Repo.init(this)
         incoming = sharedUri(intent)
+        jump = jumpTarget(intent)
         if (Build.VERSION.SDK_INT >= 33 &&
             ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
         ) {
@@ -53,7 +57,7 @@ class MainActivity : ComponentActivity() {
         }
         setContent {
             MeetScribeTheme {
-                AppRoot(incoming, onIncomingHandled = { incoming = null })
+                AppRoot(incoming, onIncomingHandled = { incoming = null }, jump, onJumpHandled = { jump = null })
             }
         }
     }
@@ -61,7 +65,11 @@ class MainActivity : ComponentActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         sharedUri(intent)?.let { incoming = it }
+        jumpTarget(intent)?.let { jump = it }
     }
+
+    private fun jumpTarget(i: Intent?): String? =
+        i?.getStringExtra(Notifier.EXTRA_OPEN_PROJECT) ?: i?.getStringExtra(Notifier.EXTRA_OPEN_SETTINGS)?.let { SETTINGS }
 
     private fun sharedUri(i: Intent?): Uri? = when (i?.action) {
         Intent.ACTION_SEND -> IntentCompat.getParcelableExtra(i, Intent.EXTRA_STREAM, Uri::class.java)
@@ -76,8 +84,10 @@ private enum class Tab(val label: String, val icon: ImageVector) {
     Settings("設定", Ic.Settings),
 }
 
+private const val SETTINGS = "settings"
+
 @Composable
-private fun AppRoot(incoming: Uri?, onIncomingHandled: () -> Unit) {
+private fun AppRoot(incoming: Uri?, onIncomingHandled: () -> Unit, jump: String?, onJumpHandled: () -> Unit) {
     // 使用者定的入口：一律從「新增轉錄」開始
     var tab by rememberSaveable { mutableStateOf(Tab.New) }
     var openProject by rememberSaveable { mutableStateOf<String?>(null) }
@@ -91,6 +101,14 @@ private fun AppRoot(incoming: Uri?, onIncomingHandled: () -> Unit) {
             openProject = null
             tab = Tab.New
         }
+    }
+    LaunchedEffect(jump) {
+        when (jump) {
+            null -> return@LaunchedEffect
+            SETTINGS -> { openProject = null; tab = Tab.Settings }
+            else -> openProject = jump
+        }
+        onJumpHandled()
     }
     BackHandler(enabled = openProject != null) { openProject = null }
 

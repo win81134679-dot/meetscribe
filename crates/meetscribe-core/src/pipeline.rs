@@ -16,7 +16,8 @@ use crate::secrets::ApiKeys;
 use crate::store::ProjectStore;
 use crate::summary;
 use crate::textutil::{fmt_clock, weight};
-use crate::units::{estimate_times, parse_spk_tags, split_units, times_from_words};
+use crate::timing::{self, Speech};
+use crate::units::{parse_spk_tags, split_units, times_from_words};
 use crate::{Error, Result};
 use futures::StreamExt;
 use std::collections::HashMap;
@@ -332,6 +333,18 @@ impl Engine {
             p.audio_file = Some(audio_rel.clone());
             self.save(p, ctx.sink)?;
         }
+        if p.playback_file.is_none() && p.source_file.is_file() {
+            ctx.progress(p, Stage::Prepare, 0.82, "準備高品質播放音訊");
+            match self.audio.playback_copy(&p.source_file, &dir, ctx.cancel).await {
+                Ok(name) => {
+                    p.playback_file = Some(name);
+                    self.save(p, ctx.sink)?;
+                }
+                Err(Error::Cancelled) => return Err(Error::Cancelled),
+                // 不影響轉錄：播放退回 16 kHz 版
+                Err(e) => ctx.log(p, LogLevel::Warn, format!("高品質播放音訊做不出來，播放改用轉錄用的版本：{e}")),
+            }
+        }
         if p.chunks.is_empty() {
             ctx.check()?;
             let target = self.settings.chunk_minutes as f64 * 60.0;
@@ -554,6 +567,7 @@ impl Engine {
         if stt.text.trim().is_empty() && stt.segments.is_empty() {
             return Ok(());
         }
+        let speech = self.chunk_speech(p, &chunk, ctx.cancel).await;
         let identify = p.options.identify_speakers;
 
         // A. 供應商直接給了說話者（原生 diarize）
@@ -572,21 +586,25 @@ impl Engine {
             } else {
                 group_words_by_speaker(&stt)
             };
-            self.push_labelled_turns(p, &chunk, turns, Timing::Provider);
+            self.push_labelled_turns(p, &chunk, turns, Timing::Provider, &speech);
             return Ok(());
         }
         // B. 文字裡有 <spk:N> 標籤
         let tagged = parse_spk_tags(&stt.text);
         if identify && !tagged.is_empty() {
             let turns = tagged.into_iter().map(|(l, t)| (l, t, None)).collect();
-            self.push_labelled_turns(p, &chunk, turns, Timing::Estimated);
+            self.push_labelled_turns(p, &chunk, turns, Timing::Estimated, &speech);
             return Ok(());
         }
         let units = split_units(&stt.text, UNIT_MAX_CHARS);
         if units.is_empty() {
             return Ok(());
         }
-        let word_times = times_from_words(&units, &stt.words);
+        let unit_refs: Vec<&str> = units.iter().map(String::as_str).collect();
+        // 供應商的逐字時間常常不可信（最後一個 300 秒窗被拉長），先檢查
+        let word_times = times_from_words(&units, &stt.words)
+            .filter(|t| timing::provider_times_ok(&unit_refs, t, chunk.duration()));
+        let weights: Vec<usize> = units.iter().map(|u| weight(u)).collect();
 
         // C. 用能聽音訊的模型分配說話者
         if identify {
@@ -595,8 +613,10 @@ impl Engine {
                     let (times, timing) = match &word_times {
                         Some(t) => (t.clone(), Timing::Provider),
                         None => {
-                            let w: Vec<usize> = units.iter().map(|u| weight(u)).collect();
-                            (attribution::fill_times(&w, &anchors, chunk.duration()), Timing::Model)
+                            // 模型的秒數常是假的（0,1,2… 等差）：不可信的整組丟掉，改依有聲音的時間分配
+                            let anchors = timing::plausible_anchors(&weights, &anchors, chunk.duration());
+                            let kind = if anchors.iter().flatten().count() >= 2 { Timing::Model } else { Timing::Estimated };
+                            (timing::fill(&weights, &anchors, chunk.duration(), &speech), kind)
                         }
                     };
                     self.push_units(p, &chunk, &units, &times, Some(&speakers), timing);
@@ -618,15 +638,31 @@ impl Engine {
                 .iter()
                 .map(|s| (String::new(), s.text.clone(), Some((s.start, s.end))))
                 .collect();
-            self.push_unlabelled(p, &chunk, turns);
+            self.push_unlabelled(p, &chunk, turns, &speech);
         } else {
             let (times, timing) = match word_times {
                 Some(t) => (t, Timing::Provider),
-                None => (estimate_times(&units, 0.0, chunk.duration()), Timing::Estimated),
+                None => (timing::fill(&weights, &[], chunk.duration(), &speech), Timing::Estimated),
             };
             self.push_units(p, &chunk, &units, &times, None, timing);
         }
         Ok(())
+    }
+
+    /// 這段音訊哪裡有聲音（給時間分配用）。偵測失敗就當整段都有聲音。
+    async fn chunk_speech(&self, p: &Project, chunk: &ChunkRecord, cancel: &CancellationToken) -> Speech {
+        let file = self.store.dir(p.id).join(&chunk.file);
+        match self
+            .audio
+            .detect_silences(&file, timing::SPEECH_NOISE_DB, timing::SPEECH_MIN_SILENCE, cancel)
+            .await
+        {
+            Ok(s) => Speech::from_silences(&s, chunk.duration()),
+            Err(e) => {
+                tracing::warn!("第 {} 段找不到停頓位置，時間改平均分配：{e}", chunk.index + 1);
+                Speech::uniform(chunk.duration())
+            }
+        }
     }
 
     /// 呼叫說話者分配模型（最多試 3 次），回傳每句的全域說話者 ID 與模型給的時間。
@@ -755,7 +791,7 @@ impl Engine {
     }
 
     /// 供應商或 `<spk:N>` 給的段內標籤：每段各自對應到新的全域說話者，跨段靠整合步驟合併。
-    fn push_labelled_turns(&self, p: &mut Project, chunk: &ChunkRecord, turns: Vec<Turn>, timing: Timing) {
+    fn push_labelled_turns(&self, p: &mut Project, chunk: &ChunkRecord, turns: Vec<Turn>, timing: Timing, speech: &Speech) {
         let mut map: HashMap<String, String> = HashMap::new();
         let mut units = Vec::new();
         let mut speakers = Vec::new();
@@ -766,19 +802,24 @@ impl Engine {
                 .or_insert_with(|| p.add_speaker(None, String::new()))
                 .clone();
             let pieces = split_units(&text, UNIT_MAX_CHARS);
-            let est = t.map(|(s, e)| estimate_times(&pieces, s, e));
+            let w: Vec<usize> = pieces.iter().map(|u| weight(u)).collect();
+            let est = t
+                .filter(|&(s, e)| s >= 0.0 && e >= s && e <= chunk.duration() + 1.0)
+                .map(|(s, e)| timing::spread(&w, s, e.min(chunk.duration()), speech));
             for (k, piece) in pieces.into_iter().enumerate() {
                 units.push(piece);
                 speakers.push(global.clone());
                 times.push(est.as_ref().map(|e| e[k]));
             }
         }
-        let times = if times.iter().all(Option::is_some) {
+        let all_timed = times.iter().all(Option::is_some);
+        let times = if all_timed {
             times.into_iter().map(|t| t.expect("checked")).collect()
         } else {
-            estimate_times(&units, 0.0, chunk.duration())
+            let w: Vec<usize> = units.iter().map(|u| weight(u)).collect();
+            timing::fill(&w, &[], chunk.duration(), speech)
         };
-        let timing = if timing == Timing::Provider && times.len() == units.len() {
+        let timing = if timing == Timing::Provider && all_timed {
             timing
         } else {
             Timing::Estimated
@@ -786,10 +827,28 @@ impl Engine {
         self.push_units(p, chunk, &units, &times, Some(&speakers), timing);
     }
 
-    fn push_unlabelled(&self, p: &mut Project, chunk: &ChunkRecord, turns: Vec<Turn>) {
-        let units: Vec<String> = turns.iter().map(|t| t.1.clone()).collect();
+    /// 供應商的段落（沒分說話者）。可信就照用；常見的是 300 秒一整段或時間超出音訊：
+    /// 切成句子，供應商段落的開頭當錨點（可信的才用），句子依有聲音的時間分配。
+    fn push_unlabelled(&self, p: &mut Project, chunk: &ChunkRecord, turns: Vec<Turn>, speech: &Speech) {
+        let texts: Vec<&str> = turns.iter().map(|t| t.1.as_str()).collect();
         let times: Vec<(f64, f64)> = turns.iter().map(|t| t.2.unwrap_or((0.0, 0.0))).collect();
-        self.push_units(p, chunk, &units, &times, None, Timing::Provider);
+        if timing::provider_times_ok(&texts, &times, chunk.duration()) {
+            let units: Vec<String> = texts.iter().map(|t| t.to_string()).collect();
+            self.push_units(p, chunk, &units, &times, None, Timing::Provider);
+            return;
+        }
+        let mut units = Vec::new();
+        let mut anchors = Vec::new();
+        for (text, (s, _)) in texts.iter().zip(&times) {
+            for (k, piece) in split_units(text, UNIT_MAX_CHARS).into_iter().enumerate() {
+                units.push(piece);
+                anchors.push((k == 0).then_some(*s));
+            }
+        }
+        let weights: Vec<usize> = units.iter().map(|u| weight(u)).collect();
+        let anchors = timing::plausible_anchors(&weights, &anchors, chunk.duration());
+        let times = timing::fill(&weights, &anchors, chunk.duration(), speech);
+        self.push_units(p, chunk, &units, &times, None, Timing::Estimated);
     }
 
     /// 這段新出現、還沒有聲音樣本的說話者，各剪一段 4～12 秒的樣本給後面段落比對。
@@ -955,4 +1014,84 @@ fn group_words_by_speaker(stt: &SttResult) -> Vec<Turn> {
         }
     }
     out
+}
+
+/// 用新的時間規則重新對齊一個已處理完的專案（2026-10-31「跟隨播放根本不準」）：每段的句子文字、說話者、修改都不動，
+/// 只重算起訖；超過 [`timing::MAX_SEGMENT_SECS`] 的一句（供應商的整窗）切成句子。不呼叫任何 API。
+/// 回傳有沒有改；沒有正規化音訊（找不到停頓）時照樣重算，只是改用平均分配。
+pub async fn retime_project(audio: &AudioTool, dir: &std::path::Path, p: &mut Project, cancel: &CancellationToken) -> Result<bool> {
+    if p.timing_rev >= timing::TIMING_REV {
+        return Ok(false);
+    }
+    let whole = match &p.audio_file {
+        Some(rel) if dir.join(rel).is_file() => match audio
+            .detect_silences(&dir.join(rel), timing::SPEECH_NOISE_DB, timing::SPEECH_MIN_SILENCE, cancel)
+            .await
+        {
+            Ok(s) => Speech::from_silences(&s, p.duration.max(p.chunks.last().map_or(0.0, |c| c.end))),
+            Err(Error::Cancelled) => return Err(Error::Cancelled),
+            Err(_) => Speech::uniform(p.duration),
+        },
+        _ => Speech::uniform(p.duration),
+    };
+    let mut next_id = p.next_segment_id();
+    let mut out: Vec<Segment> = Vec::with_capacity(p.segments.len());
+    let mut segments = std::mem::take(&mut p.segments);
+    segments.sort_by(|a, b| a.chunk.cmp(&b.chunk).then(a.start.total_cmp(&b.start)).then(a.id.cmp(&b.id)));
+    for chunk in &p.chunks {
+        let segs: Vec<Segment> = segments.iter().filter(|s| s.chunk == chunk.index).cloned().collect();
+        if segs.is_empty() {
+            continue;
+        }
+        let dur = chunk.duration();
+        let speech = whole.slice(chunk.start, chunk.end);
+        let texts: Vec<&str> = segs.iter().map(|s| s.text.as_str()).collect();
+        let rel: Vec<(f64, f64)> = segs.iter().map(|s| (s.start - chunk.start, s.end - chunk.start)).collect();
+        if segs.iter().all(|s| s.timing == Timing::Provider) && timing::provider_times_ok(&texts, &rel, dur) {
+            out.extend(segs);
+            continue;
+        }
+        // 句子（長的切開），每句原本的開頭當候選錨點（估算的不算）
+        let mut pieces: Vec<Segment> = Vec::new();
+        let mut anchors: Vec<Option<f64>> = Vec::new();
+        for (seg, &(s, e)) in segs.iter().zip(&rel) {
+            let parts = if e - s > timing::MAX_SEGMENT_SECS { split_units(&seg.text, UNIT_MAX_CHARS) } else { vec![seg.text.clone()] };
+            for (k, text) in parts.into_iter().enumerate() {
+                let id = if k == 0 {
+                    seg.id
+                } else {
+                    next_id += 1;
+                    next_id - 1
+                };
+                anchors.push((k == 0 && seg.timing != Timing::Estimated).then_some(s));
+                pieces.push(Segment { id, text, ..seg.clone() });
+            }
+        }
+        let weights: Vec<usize> = pieces.iter().map(|s| weight(&s.text)).collect();
+        let anchors = timing::plausible_anchors(&weights, &anchors, dur);
+        let times = timing::fill(&weights, &anchors, dur, &speech);
+        for ((mut seg, (s, e)), a) in pieces.into_iter().zip(times).zip(&anchors) {
+            seg.start = chunk.start + s;
+            seg.end = chunk.start + e;
+            if a.is_none() {
+                seg.timing = Timing::Estimated;
+            }
+            out.push(seg);
+        }
+    }
+    // 不屬於任何段落的句子（理論上沒有）原樣留著
+    out.extend(segments.into_iter().filter(|s| !p.chunks.iter().any(|c| c.index == s.chunk)));
+    p.segments = out;
+    p.sort_segments();
+    p.timing_rev = timing::TIMING_REV;
+    Ok(true)
+}
+
+/// 1.1 之前處理的專案補做高品質播放副本（原始檔還在才做得到）。回傳有沒有改。
+pub async fn ensure_playback(audio: &AudioTool, dir: &std::path::Path, p: &mut Project, cancel: &CancellationToken) -> Result<bool> {
+    if p.playback_file.as_ref().is_some_and(|f| dir.join(f).is_file()) || !p.source_file.is_file() {
+        return Ok(false);
+    }
+    p.playback_file = Some(audio.playback_copy(&p.source_file, dir, cancel).await?);
+    Ok(true)
 }

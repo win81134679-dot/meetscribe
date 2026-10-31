@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>MeetScribe 處理流程圖</title>
+  <title>語音轉錄 處理流程圖</title>
   <link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500;600&family=Noto+Sans+TC:wght@400;500;600&family=Noto+Serif+TC:wght@400&display=swap" rel="stylesheet">
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -26,7 +26,7 @@
 <body>
 <div class="diagram-container">
 <svg viewBox="0 0 1280 904" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="ms-flow-title ms-flow-desc">
-<title id="ms-flow-title">MeetScribe 處理流程圖</title>
+<title id="ms-flow-title">語音轉錄 處理流程圖</title>
 <desc id="ms-flow-desc">一場會議依序經過前處理、轉錄、說話者分配、摘要、匯出五個階段：前處理在本機轉檔切段（電腦用 ffmpeg，Android 用內建解碼與 MP3 編碼），轉錄用付費的 Nemotron 3.5 Transcribe，說話者與摘要用 Gemini 免費額度，摘要在電腦版也可手動改用 Claude Code CLI，每一步完成都存檔、可從斷點續跑。</desc>
 <defs>
 <marker id="ms-flow-arr-proc" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#3949ab"/></marker>

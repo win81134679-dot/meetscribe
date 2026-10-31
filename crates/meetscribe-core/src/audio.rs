@@ -79,7 +79,31 @@ impl AudioTool {
             Self::Native(n) => n.extract(input, start, end, output).await,
         }
     }
+
+    /// 播放用的高品質副本放進 `dir`，回傳檔名（2026-10-31 使用者：「音訊格式是否可以改成 aac 高品質避免品質變差」）。
+    /// 送轉錄的 16 kHz 版本是給模型聽的（Nemotron 本來就以 16 kHz 處理），人聽會覺得悶；播放、核對改聽這份。
+    /// 電腦：ffmpeg 轉 AAC 128 kbps 單聲道、保留原取樣率（`playback.m4a`）。Android：沒有 AAC 編碼器，直接保留原始檔（不重壓、零損失）。
+    pub async fn playback_copy(&self, input: &Path, dir: &Path, cancel: &CancellationToken) -> Result<String> {
+        match self {
+            Self::Ffmpeg(f) => f.playback_copy(input, dir, cancel).await,
+            #[cfg(feature = "native-audio")]
+            Self::Native(_) => {
+                let ext = input
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .map(str::to_ascii_lowercase)
+                    .filter(|e| !e.is_empty() && e.len() <= 5)
+                    .unwrap_or_else(|| "audio".into());
+                let name = format!("{PLAYBACK_STEM}.{ext}");
+                tokio::fs::copy(input, dir.join(&name)).await?;
+                Ok(name)
+            }
+        }
+    }
 }
+
+/// 播放用副本的檔名（不含副檔名）。
+pub const PLAYBACK_STEM: &str = "playback";
 
 #[derive(Clone, Debug)]
 pub struct Ffmpeg {
@@ -175,7 +199,7 @@ impl Ffmpeg {
             .ok_or_else(|| Error::Ffmpeg(format!("「{}」沒有可用的音軌", input.display())))
     }
 
-    /// 轉成 16 kHz mono MP3。`progress` 收到 0..=1。
+    /// 轉成 16 kHz mono MP3 64 kbps（送轉錄用；1.0 是 32 kbps，壓縮痕跡比較明顯）。`progress` 收到 0..=1。
     pub async fn normalize(
         &self,
         input: &Path,
@@ -187,7 +211,7 @@ impl Ffmpeg {
         let mut cmd = command(&self.ffmpeg);
         cmd.args(["-hide_banner", "-nostdin", "-y", "-i"])
             .arg(input)
-            .args(["-vn", "-ac", "1", "-ar", "16000", "-c:a", "libmp3lame", "-b:a", "32k"])
+            .args(["-vn", "-ac", "1", "-ar", "16000", "-c:a", "libmp3lame", "-b:a", "64k"])
             .args(["-progress", "pipe:1", "-nostats"])
             .arg(output)
             .stdout(Stdio::piped())
@@ -259,6 +283,30 @@ impl Ffmpeg {
     }
 
     /// 剪出 [start, end) 一段（MP3 直接複製，不重新編碼）。
+    /// 見 [`AudioTool::playback_copy`]。
+    pub async fn playback_copy(&self, input: &Path, dir: &Path, cancel: &CancellationToken) -> Result<String> {
+        let name = format!("{PLAYBACK_STEM}.m4a");
+        let out = command(&self.ffmpeg)
+            .args(["-hide_banner", "-nostdin", "-y", "-i"])
+            .arg(input)
+            .args(["-vn", "-ac", "1", "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart"])
+            .arg(dir.join(&name))
+            .kill_on_drop(true)
+            .output();
+        let out = tokio::select! {
+            _ = cancel.cancelled() => return Err(Error::Cancelled),
+            o = out => o?,
+        };
+        if !out.status.success() {
+            let _ = std::fs::remove_file(dir.join(&name));
+            return Err(Error::Ffmpeg(format!(
+                "轉播放用音訊失敗：{}",
+                last_lines(&String::from_utf8_lossy(&out.stderr), 5)
+            )));
+        }
+        Ok(name)
+    }
+
     pub async fn extract(&self, input: &Path, start: f64, end: f64, output: &Path) -> Result<()> {
         let out = command(&self.ffmpeg)
             .args(["-hide_banner", "-nostdin", "-y", "-ss", &format!("{start:.3}"), "-i"])

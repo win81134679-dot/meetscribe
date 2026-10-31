@@ -18,6 +18,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
@@ -61,6 +62,7 @@ import androidx.compose.ui.unit.dp
 import io.github.win81134679.meetscribe.core.ProjectDetail
 import io.github.win81134679.meetscribe.core.Repo
 import io.github.win81134679.meetscribe.core.Segment
+import io.github.win81134679.meetscribe.core.Storage
 import io.github.win81134679.meetscribe.core.formatClock
 import io.github.win81134679.meetscribe.core.strings
 import kotlinx.coroutines.delay
@@ -234,7 +236,7 @@ private class Player(val mp: MediaPlayer?) {
 
     fun playFrom(secs: Double) {
         val m = mp ?: return
-        m.seekTo((secs * 1000).toInt())
+        m.seekTo((secs * 1000).toLong(), MediaPlayer.SEEK_CLOSEST)
         m.start()
         playing = true
     }
@@ -267,9 +269,21 @@ private fun rememberPlayer(path: String?): Player {
 @Composable
 private fun TranscriptTab(p: ProjectDetail, busy: Boolean, player: Player) {
     val pal = Pal.current
+    val ctx = LocalContext.current
     var editing by remember { mutableStateOf<Segment?>(null) }
+    var query by rememberSaveable(p.id) { mutableStateOf("") }
     val colors = p.speakers.associate { it.id to speakerColor(it.color) }
     Column(Modifier.fillMaxSize()) {
+        if (p.segments.isNotEmpty()) {
+            Row(Modifier.padding(start = 16.dp, end = 4.dp, top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                val q = query.trim()
+                val hits = if (q.isEmpty()) null else p.segments.count { it.text.contains(q, true) || it.speakerName.contains(q, true) }
+                SearchField(query, "搜尋逐字稿", Modifier.weight(1f), trailing = hits?.let { "$it 段" }) { query = it }
+                IconButton(onClick = { copyText(ctx, "逐字稿", transcriptText(p)) }) {
+                    Icon(Ic.Copy, contentDescription = "複製全文")
+                }
+            }
+        }
         if (player.mp != null) {
             Row(
                 Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
@@ -280,7 +294,7 @@ private fun TranscriptTab(p: ProjectDetail, busy: Boolean, player: Player) {
                 }
                 Slider(
                     value = player.position.coerceIn(0f, player.duration.coerceAtLeast(1f)),
-                    onValueChange = { player.position = it; player.mp.seekTo((it * 1000).toInt()) },
+                    onValueChange = { player.position = it; player.mp.seekTo((it * 1000).toLong(), MediaPlayer.SEEK_CLOSEST) },
                     valueRange = 0f..player.duration.coerceAtLeast(1f),
                     modifier = Modifier.weight(1f),
                 )
@@ -296,8 +310,19 @@ private fun TranscriptTab(p: ProjectDetail, busy: Boolean, player: Player) {
         val currentId = if (player.playing) {
             p.segments.lastOrNull { it.start <= player.position + 0.05 }?.id
         } else null
-        LazyColumn(contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            items(p.segments, key = { it.id }) { seg ->
+        val q = query.trim()
+        val shown = if (q.isEmpty()) p.segments else p.segments.filter { it.text.contains(q, true) || it.speakerName.contains(q, true) }
+        // 跟隨播放：播到下一句就捲過去（使用者手動捲動時不搶）
+        val list = rememberLazyListState()
+        LaunchedEffect(currentId) {
+            val idx = shown.indexOfFirst { it.id == currentId }
+            if (idx >= 0 && !list.isScrollInProgress) list.animateScrollToItem((idx - 1).coerceAtLeast(0))
+        }
+        LazyColumn(
+            state = list,
+            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            items(shown, key = { it.id }) { seg ->
                 val c = seg.speaker?.let { colors[it] } ?: pal.textMuted
                 Column(
                     Modifier
@@ -322,7 +347,7 @@ private fun TranscriptTab(p: ProjectDetail, busy: Boolean, player: Player) {
                         )
                         if (seg.edited) Text("（已修改）", color = pal.textMuted, style = MaterialTheme.typography.labelSmall)
                     }
-                    Text(seg.text, style = MaterialTheme.typography.bodyLarge)
+                    Text(highlight(seg.text, q, pal.accentSoft), style = MaterialTheme.typography.bodyLarge)
                 }
             }
         }
@@ -389,6 +414,7 @@ private fun SummaryTab(p: ProjectDetail, busy: Boolean) {
     ) {
         val s = p.summaryDoc
         FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            if (s != null) IconLabelButton(Ic.Copy, "複製") { copyText(ctx, "摘要", s.markdown) }
             if (s != null) IconLabelButton(Ic.Share, "分享文字") { Files.shareText(ctx, s.markdown) }
             IconLabelButton(Ic.Refresh, if (s == null) "產生摘要" else "重新產生", enabled = !busy && !working && p.segments.isNotEmpty()) {
                 regen = true
@@ -485,6 +511,7 @@ private fun ExportTab(p: ProjectDetail) {
     }
     var files by remember(p.id) { mutableStateOf(p.exported.map(::File).filter { it.isFile }) }
     var working by remember { mutableStateOf(false) }
+    var fresh by remember(p.id) { mutableStateOf(false) }
     val formats = opts.optJSONArray("formats").strings().toSet()
 
     fun update(f: JSONObject.() -> Unit) {
@@ -519,13 +546,40 @@ private fun ExportTab(p: ProjectDetail) {
             scope.launch {
                 val r = Repo.tryCall("export", "id" to p.id, "options" to opts) as? JSONArray
                 working = false
-                if (r != null) files = r.strings().map(::File)
+                if (r != null) {
+                    files = r.strings().map(::File)
+                    fresh = true
+                    Storage.scan(ctx, files)
+                    Repo.loadProject(p.id)?.let { Repo.projectUpdates.emit(it) }
+                }
             }
         }
-        if (files.isNotEmpty()) {
-            SectionCard("匯出的檔案", "存在 App 的匯出資料夾；用「分享」存到雲端硬碟、傳 LINE 或寄信。") {
-                IconLabelButton(Ic.Share, "全部分享") { Files.share(ctx, files) }
-                for (f in files) {
+        // 剛匯出的檔所在處優先，其次核心算的會議資料夾（1.0 的會議以前匯出在舊的私有區，那份最後才用）
+        val folder = ((if (fresh) files.firstOrNull()?.parent else null) ?: p.folder ?: files.firstOrNull()?.parent)
+            ?.let(::File)?.takeIf { it.isDirectory }
+        // 這次沒匯出過：列資料夾裡現有的檔（例如完成時自動匯出的）
+        val listed = files.ifEmpty {
+            folder?.listFiles()?.filter { it.isFile && !it.name.startsWith(".") }?.sortedBy { it.name }.orEmpty()
+        }
+        if (folder != null) {
+            SectionCard("會議資料夾", Storage.displayPath(folder)) {
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    IconLabelButton(Ic.Folder, "開啟資料夾", primary = true) {
+                        if (!Storage.openFolder(ctx, folder)) {
+                            scope.launch { Repo.toasts.emit(false to "這支手機沒有能直接開資料夾的 App，檔案列在下面") }
+                        }
+                    }
+                    IconLabelButton(Ic.Share, "全部分享", enabled = listed.isNotEmpty()) { Files.share(ctx, listed) }
+                }
+                Text(
+                    "也可以在「檔案」App 的「文件 › 語音轉錄」找到；手機接電腦時在「Documents\\語音轉錄」。",
+                    color = Pal.current.textMuted, style = MaterialTheme.typography.bodySmall,
+                )
+            }
+        }
+        if (listed.isNotEmpty()) {
+            SectionCard("匯出的檔案", "用「分享」存到雲端硬碟、傳 LINE 或寄信。") {
+                for (f in listed) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Text(f.name, Modifier.weight(1f), maxLines = 2, overflow = TextOverflow.Ellipsis)
                         IconButton(onClick = {
@@ -573,4 +627,33 @@ fun TextInputDialog(
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
     )
+}
+
+/** 複製用的逐字稿全文：[時間] 說話者：內容，一段一行。 */
+private fun transcriptText(p: ProjectDetail): String = buildString {
+    appendLine(p.summary.title)
+    appendLine()
+    for (seg in p.segments) {
+        append("[").append(formatClock(seg.start)).append("] ")
+        if (seg.speakerName.isNotBlank()) append(seg.speakerName).append("：")
+        appendLine(seg.text)
+    }
+}
+
+/** 搜尋字詞反白。 */
+private fun highlight(text: String, q: String, bg: androidx.compose.ui.graphics.Color): androidx.compose.ui.text.AnnotatedString {
+    if (q.isEmpty()) return androidx.compose.ui.text.AnnotatedString(text)
+    return androidx.compose.ui.text.buildAnnotatedString {
+        var i = 0
+        while (true) {
+            val j = text.indexOf(q, i, ignoreCase = true)
+            if (j < 0) break
+            append(text.substring(i, j))
+            pushStyle(androidx.compose.ui.text.SpanStyle(background = bg, fontWeight = FontWeight.SemiBold))
+            append(text.substring(j, j + q.length))
+            pop()
+            i = j + q.length
+        }
+        append(text.substring(i))
+    }
 }

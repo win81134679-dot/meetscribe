@@ -23,6 +23,9 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -39,6 +42,7 @@ fun ProjectsScreen(onOpen: (String) -> Unit) {
     val progress by Repo.progress.collectAsState()
     val busy by Repo.busy.collectAsState()
     LaunchedEffect(Unit) { runCatching { Repo.refreshProjects() } }
+    var query by rememberSaveable { mutableStateOf("") }
 
     if (projects.isEmpty()) {
         Box(Modifier.fillMaxSize().padding(32.dp), contentAlignment = Alignment.Center) {
@@ -51,7 +55,14 @@ fun ProjectsScreen(onOpen: (String) -> Unit) {
         verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
         item { Text("會議記錄", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.SemiBold) }
-        items(projects, key = { it.id }) { p ->
+        // 會議多了才需要找：五場以上才出現搜尋框
+        if (projects.size >= 5 || query.isNotEmpty()) {
+            item { SearchField(query, "搜尋會議標題") { query = it } }
+        }
+        val q = query.trim()
+        val shown = if (q.isEmpty()) projects else projects.filter { it.title.contains(q, ignoreCase = true) || it.createdAt.contains(q) }
+        if (shown.isEmpty()) item { Text("沒有符合「$q」的會議。", color = Pal.current.textMuted) }
+        items(shown, key = { it.id }) { p ->
             ProjectRow(p, p.id in busy, progress[p.id]?.let { it.stageLabel to it.fraction }) { onOpen(p.id) }
         }
     }

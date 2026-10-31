@@ -63,7 +63,7 @@ pub struct ExportOptions {
     pub formats: Vec<String>,
     /// 存放資料夾；空白＝原始錄音所在資料夾。
     pub dir: String,
-    /// 每場會議另建一個子資料夾（名稱同檔名）。
+    /// 每場會議另建一個子資料夾（名稱同檔名）。預設開（2026-10-31 使用者）。
     pub subfolder: bool,
     /// 檔名樣式，可用 [`FILENAME_TOKENS`]。
     pub filename: String,
@@ -86,7 +86,7 @@ impl Default for ExportOptions {
             auto: true,
             formats: vec!["docx".into(), "md".into(), "srt".into()],
             dir: String::new(),
-            subfolder: false,
+            subfolder: true,
             filename: FILENAME_PRESETS[0].into(),
             overwrite: false,
             content: Content::Both,
@@ -857,6 +857,7 @@ mod tests {
         p.title = "週會:預算/人力".into();
         let o = ExportOptions {
             filename: "{日期} {標題}".into(),
+            subfolder: false,
             ..opts()
         };
         let date = p.created_at.format("%Y-%m-%d").to_string();

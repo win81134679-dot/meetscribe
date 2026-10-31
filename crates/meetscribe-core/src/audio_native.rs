@@ -1,4 +1,4 @@
-//! 不靠 ffmpeg 的音訊後端（Android 用）：symphonia 解碼、自己重取樣成 16 kHz mono、LAME 編 32 kbps MP3。
+//! 不靠 ffmpeg 的音訊後端（Android 用）：symphonia 解碼、自己重取樣成 16 kHz mono、LAME 編 64 kbps MP3。
 //!
 //! 介面與 [`crate::audio::Ffmpeg`] 相同，靜音偵測的判定照 ffmpeg `silencedetect`：
 //! 每個取樣的振幅都低於門檻、而且連續超過指定秒數才算一段靜音。
@@ -49,7 +49,7 @@ impl NativeAudio {
         .await
     }
 
-    /// 轉成 16 kHz mono 32 kbps MP3。`progress` 收到 0..=1。
+    /// 轉成 16 kHz mono 64 kbps MP3。`progress` 收到 0..=1。
     pub async fn normalize(
         &self,
         input: &Path,
@@ -426,7 +426,7 @@ impl Mp3Writer {
         let mut b = Builder::new().ok_or_else(|| lame(&"LAME"))?;
         b.set_num_channels(1).map_err(|e| lame(&e))?;
         b.set_sample_rate(TARGET_RATE).map_err(|e| lame(&e))?;
-        b.set_brate(Bitrate::Kbps32).map_err(|e| lame(&e))?;
+        b.set_brate(Bitrate::Kbps64).map_err(|e| lame(&e))?;
         b.set_quality(Quality::Good).map_err(|e| lame(&e))?;
         let enc = b.build().map_err(|e| lame(&e))?;
         let file = std::fs::File::create(path)

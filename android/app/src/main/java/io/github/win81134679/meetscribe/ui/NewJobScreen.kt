@@ -1,5 +1,7 @@
 package io.github.win81134679.meetscribe.ui
 
+import android.Manifest
+import android.content.pm.PackageManager
 import android.net.Uri
 import android.util.Log
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -35,11 +37,13 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
+import androidx.core.content.ContextCompat
 import io.github.win81134679.meetscribe.core.AudioImport
 import io.github.win81134679.meetscribe.core.ImportedAudio
 import io.github.win81134679.meetscribe.core.ProjectDetail
 import io.github.win81134679.meetscribe.core.Repo
 import io.github.win81134679.meetscribe.core.formatClock
+import io.github.win81134679.meetscribe.service.Recording
 import kotlinx.coroutines.launch
 import org.json.JSONArray
 import org.json.JSONObject
@@ -107,6 +111,38 @@ fun NewJobScreen(
     }
 
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri -> uri?.let(::importUri) }
+    val rec by Recording.state.collectAsState()
+    val askMic = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        if (granted) Recording.start(ctx) else scope.launch { Repo.toasts.emit(true to "沒有麥克風權限，無法錄音") }
+    }
+    fun startRecording() {
+        if (ContextCompat.checkSelfPermission(ctx, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
+            Recording.start(ctx)
+        } else {
+            askMic.launch(Manifest.permission.RECORD_AUDIO)
+        }
+    }
+    // 錄完：當成選好的錄音（標題預設「會議錄音 日期 時間」）
+    LaunchedEffect(Unit) {
+        Recording.finished.collect { (file, name) ->
+            @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+            Recording.finished.resetReplayCache()
+            d.audio?.let(AudioImport::discard)
+            d.audio = null
+            d.cost = null
+            d.status = "讀取錄音…"
+            try {
+                val a = AudioImport.fromFile(file, "$name.m4a")
+                d.audio = a
+                if (d.title.isBlank()) d.title = name
+                d.status = null
+                d.cost = (Repo.tryCall("estimate_cost", "duration" to a.duration) as? Number)?.toDouble()
+            } catch (e: Exception) {
+                d.status = null
+                Repo.toasts.emit(true to (e.message ?: "讀不到錄好的音檔"))
+            }
+        }
+    }
     LaunchedEffect(incoming) {
         if (incoming != null) {
             importUri(incoming)
@@ -123,11 +159,14 @@ fun NewJobScreen(
     ) {
         Text("新增轉錄", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.SemiBold)
 
+        UpdateBanner()
+
         if (!hasKey) SetupCard(onOpenSettings) else AccountRow()
 
-        SectionCard("錄音檔", "支援手機上常見的錄音與影片格式（m4a、mp3、wav、aac、ogg、opus、amr、mp4…）。") {
+        SectionCard("錄音檔", "現場錄音，或選手機裡的錄音、影片（m4a、mp3、wav、aac、ogg、opus、amr、mp4…）。") {
             val a = d.audio
             when {
+                rec.phase != Recording.Phase.Idle -> RecordingPanel()
                 d.status != null -> Busy(d.status!!)
                 a != null -> {
                     Text(a.displayName, fontWeight = FontWeight.Medium)
@@ -140,8 +179,15 @@ fun NewJobScreen(
                     )
                 }
             }
-            IconLabelButton(Ic.Add, if (a == null) "選擇錄音檔" else "換一個檔案", primary = a == null, enabled = d.status == null) {
-                picker.launch(arrayOf("audio/*", "video/*"))
+            if (rec.phase == Recording.Phase.Idle) {
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    IconLabelButton(Ic.Record, if (a == null) "開始錄音" else "重新錄音", primary = a == null, enabled = d.status == null) {
+                        startRecording()
+                    }
+                    IconLabelButton(Ic.Add, if (a == null) "選擇錄音檔" else "換一個檔案", enabled = d.status == null) {
+                        picker.launch(arrayOf("audio/*", "video/*"))
+                    }
+                }
             }
         }
 
@@ -205,7 +251,7 @@ fun NewJobScreen(
                     }
                 }
             },
-            enabled = hasKey && d.audio != null && !d.starting,
+            enabled = hasKey && d.audio != null && !d.starting && rec.phase == Recording.Phase.Idle,
             modifier = Modifier.fillMaxWidth().height(52.dp),
         ) {
             Text(if (d.starting) "建立中…" else "開始轉錄", style = MaterialTheme.typography.titleMedium)

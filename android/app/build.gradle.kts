@@ -6,7 +6,8 @@ plugins {
 }
 
 // 版本號跟桌面版一致：根 Cargo.toml 的 [workspace.package] version
-val appVersion: String = rootProject.file("../Cargo.toml").readLines()
+// -Pmeetscribe.version=x.y.z 只給測試自動更新用（同一份程式包成「較新」的 APK）
+val appVersion: String = findProperty("meetscribe.version") as String? ?: rootProject.file("../Cargo.toml").readLines()
     .first { it.startsWith("version = ") }
     .substringAfter('"').substringBefore('"')
 val (major, minor, patch) = appVersion.split('.').map { it.toInt() }

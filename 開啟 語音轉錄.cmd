@@ -1,5 +1,5 @@
 @echo off
-rem 雙擊開啟 MeetScribe（用的是 cargo build --release 產出的程式）
+rem 雙擊開啟語音轉錄（用的是 cargo build --release 產出的程式）
 chcp 65001 >nul
 set "APP=%~dp0target\release\meetscribe-app.exe"
 if exist "%APP%" (

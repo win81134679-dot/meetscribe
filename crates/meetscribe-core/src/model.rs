@@ -261,6 +261,12 @@ pub struct Project {
     /// 最近一次自動匯出寫出的檔案。
     #[serde(default)]
     pub exported: Vec<PathBuf>,
+    /// 時間對齊的版本：舊於 [`crate::timing::TIMING_REV`] 的專案由 `pipeline::retime_project` 重新對齊一次（不用呼叫 API）。
+    #[serde(default)]
+    pub timing_rev: u32,
+    /// 播放用的高品質副本（專案資料夾內的相對路徑，見 `AudioTool::playback_copy`）；沒有就播 `audio_file`。
+    #[serde(default)]
+    pub playback_file: Option<String>,
 }
 
 impl Project {
@@ -291,6 +297,8 @@ impl Project {
             models: ModelsUsed::default(),
             warnings: Vec::new(),
             exported: Vec::new(),
+            timing_rev: crate::timing::TIMING_REV,
+            playback_file: None,
         }
     }
 
@@ -374,6 +382,11 @@ impl Project {
             }
         }
         true
+    }
+
+    /// 播放、核對要聽的檔：高品質副本優先。
+    pub fn playback_audio(&self) -> Option<&str> {
+        self.playback_file.as_deref().or(self.audio_file.as_deref())
     }
 
     pub fn next_segment_id(&self) -> u64 {

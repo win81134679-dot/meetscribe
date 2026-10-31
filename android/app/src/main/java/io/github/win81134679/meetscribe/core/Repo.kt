@@ -18,6 +18,16 @@ import java.io.File
 
 class BridgeError(message: String) : Exception(message)
 
+/** 更新的狀態（設定頁「關於與更新」、新增轉錄頁頂端的提示）。 */
+sealed interface UpdateUi {
+    data object Idle : UpdateUi
+    data object Checking : UpdateUi
+    data class Downloading(val version: String, val done: Long, val total: Long) : UpdateUi
+    data object Latest : UpdateUi
+    data class Ready(val version: String, val notes: String, val apk: File, val targeted: Boolean) : UpdateUi
+    data class Failed(val message: String) : UpdateUi
+}
+
 /**
  * App 與 Rust 核心之間唯一的出入口：同步請求走 [call]，背景事件由 [pollLoop] 收進各個 StateFlow，
  * 畫面只讀這些 Flow。跟桌面的 worker.rs／app.rs 分工相同。
@@ -40,6 +50,9 @@ object Repo {
     /** 專案頁訂閱：某個專案有新內容。 */
     val projectUpdates = MutableSharedFlow<ProjectDetail>(extraBufferCapacity = 64)
     val toasts = MutableSharedFlow<Pair<Boolean, String>>(extraBufferCapacity = 16)
+    val update = MutableStateFlow<UpdateUi>(UpdateUi.Idle)
+    /** 這台的識別碼（發佈者用它單獨推送更新）。 */
+    var deviceId: String = ""; private set
 
     var exporters: List<Exporter> = emptyList(); private set
     var contents: List<Choice> = emptyList(); private set
@@ -47,6 +60,8 @@ object Repo {
     var exportsDir: File = File("."); private set
     var importsDir: File = File("."); private set
     var version: String = ""; private set
+    /** App 的版本（versionName；Rust 的版本號跟它一樣，但測試版可以只改 APK 的）。 */
+    var appVersion: String = ""; private set
     var initError: String? = null; private set
 
     fun init(context: Context) {
@@ -54,7 +69,8 @@ object Repo {
         started = true
         app = context.applicationContext
         val data = File(app.filesDir, "data")
-        val exports = app.getExternalFilesDir("exports") ?: File(app.filesDir, "exports")
+        val exports = Storage.exportsDir(app)
+        appVersion = runCatching { app.packageManager.getPackageInfo(app.packageName, 0).versionName }.getOrNull().orEmpty()
         val r = JSONObject(Native.init(data.absolutePath, exports.absolutePath))
         if (!r.optBoolean("ok")) {
             initError = r.optString("error")
@@ -62,6 +78,62 @@ object Repo {
         }
         runCatching { loadState(callSync("state") as JSONObject) }.onFailure { initError = it.message }
         scope.launch { pollLoop() }
+        scope.launch { startUpdates() }
+    }
+
+    // ---------- 更新 ----------
+
+    private suspend fun startUpdates() {
+        val info = runCatching { call("update_info", "version" to appVersion) as JSONObject }.getOrNull() ?: return
+        deviceId = info.optString("device_id")
+        info.optStringOrNull("updated_from")?.let { toasts.emit(false to "已更新到 $appVersion（原本 $it）") }
+        info.optJSONObject("ready")?.let { r ->
+            update.value = UpdateUi.Ready(r.optString("version"), r.optString("notes"), File(r.optString("path")), r.optBoolean("targeted"))
+        }
+        if (info.optBoolean("due") && settings.value.optBoolean("auto_update", true)) checkUpdate(manual = false)
+    }
+
+    fun checkUpdate(manual: Boolean) {
+        if (update.value is UpdateUi.Checking || update.value is UpdateUi.Downloading) return
+        scope.launch { tryCall("check_update", "version" to appVersion, "manual" to manual) }
+    }
+
+    /** 按「更新」：第一次先請使用者允許安裝；之後交給 PackageInstaller。 */
+    fun installUpdate(ctx: Context) {
+        val r = update.value as? UpdateUi.Ready ?: return
+        if (!Updater.canInstall(ctx)) {
+            toasts.tryEmit(false to "請允許「語音轉錄」安裝應用程式，回來再按一次「更新」")
+            Updater.openInstallPermission(ctx)
+            return
+        }
+        if (busy.value.isNotEmpty()) {
+            toasts.tryEmit(true to "還有會議在處理，做完再更新")
+            return
+        }
+        scope.launch {
+            runCatching { Updater.install(app, r.apk) }
+                .onFailure { toasts.emit(true to "無法安裝新版：${it.message ?: it.javaClass.simpleName}") }
+        }
+    }
+
+    fun updateFailed(text: String) {
+        toasts.tryEmit(true to text)
+    }
+
+    private fun handleUpdate(e: JSONObject) {
+        val manual = e.optBoolean("manual")
+        val next = when (e.optString("status")) {
+            "checking" -> UpdateUi.Checking
+            "downloading" -> UpdateUi.Downloading(e.optString("version"), e.optLong("done"), e.optLong("total"))
+            "latest" -> UpdateUi.Latest.also { if (manual) toasts.tryEmit(false to "目前已是最新版：$appVersion") }
+            "ready" -> UpdateUi.Ready(e.optString("version"), e.optString("notes"), File(e.optString("path")), e.optBoolean("targeted"))
+            else -> UpdateUi.Failed(e.optString("error")).also { if (manual) toasts.tryEmit(true to "檢查更新失敗：${it.message}") }
+        }
+        val before = update.value
+        update.value = next
+        if (next is UpdateUi.Ready && (before as? UpdateUi.Ready)?.version != next.version) {
+            Notifier.updateReady(app, next.version)
+        }
     }
 
     private fun loadState(st: JSONObject) {
@@ -172,8 +244,14 @@ object Repo {
                 val d = ProjectDetail.from(e.getJSONObject("project"))
                 projectUpdates.tryEmit(d)
                 replaceSummary(d.summary)
-                if (e.optString("type") == "finished") progress.update { it - d.id }
+                if (e.optString("type") == "finished") {
+                    progress.update { it - d.id }
+                    Storage.scan(app, d.exported.map(::File))
+                    // 排隊跑完的才通知（重新產生摘要也會送 finished，但那時人就在畫面上）
+                    if (d.summary.status == "done" && d.id in busy.value) Notifier.projectDone(app, d.id, d.summary.title)
+                }
             }
+            "update" -> handleUpdate(e)
             "toast" -> toasts.tryEmit(e.optBoolean("error") to e.optString("text"))
             "busy" -> {
                 val ids = e.optJSONArray("ids").strings().toSet()

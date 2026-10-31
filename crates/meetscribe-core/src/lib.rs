@@ -24,6 +24,8 @@ pub mod secrets;
 pub mod store;
 pub mod summary;
 pub mod textutil;
+pub mod timing;
 pub mod units;
+pub mod update;
 
 pub use error::{Error, Result};

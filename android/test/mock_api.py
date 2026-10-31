@@ -5,11 +5,15 @@
 每個請求記一行到 received/requests.log。
 
 用法：python -I android/test/mock_api.py <輸出資料夾> [轉錄延遲秒數]
+自動更新：環境變數 MOCK_RELEASES=<資料夾>，底下每個子資料夾是一個 Release（名稱＝tag，裡面放 update.json、update.sig、APK），
+模擬 GitHub 的 GET /repos/win81134679-dot/meetscribe/releases 與資產下載 /dl/<tag>/<檔名>。
+App 的 settings.json 設 update_api＝http://10.0.2.2:18765。簽章用真的發佈金鑰：uv run 工具/publish.py publish --dry-run --dist <放 APK 的資料夾> --version <x.y.z> --only android。
 App 那邊：debug 版用 run-as 把 files/data/settings.json 的 api_base 改成 http://10.0.2.2:18765、
 google_api_base 改成 http://10.0.2.2:18765/gemini，重開 App，金鑰隨便填（sk-or-v1-…、AIza…）。
 """
 import base64
 import json
+import os
 import re
 import sys
 import threading
@@ -18,6 +22,7 @@ from pathlib import Path
 
 OUT = Path(sys.argv[1] if len(sys.argv) > 1 else "received")
 OUT.mkdir(parents=True, exist_ok=True)
+RELEASES = Path(os.environ["MOCK_RELEASES"]) if os.environ.get("MOCK_RELEASES") else None
 LOCK = threading.Lock()
 COUNT = {"stt": 0}
 
@@ -84,6 +89,23 @@ class H(BaseHTTPRequestHandler):
             return self.send({"data": [{"id": "nvidia/nemotron-3-ultra-550b-a55b:free", "name": "x", "context_length": 1000000,
                                         "pricing": {"prompt": "0", "completion": "0"},
                                         "architecture": {"input_modalities": ["text"], "output_modalities": ["text"]}}]})
+        if p == "/repos/win81134679-dot/meetscribe/releases" and RELEASES:
+            base = f"http://{self.headers.get('Host', '127.0.0.1:18765')}"
+            out = [{"tag_name": d.name, "draft": False,
+                    "assets": [{"name": f.name, "browser_download_url": f"{base}/dl/{d.name}/{f.name}", "size": f.stat().st_size}
+                               for f in sorted(d.iterdir()) if f.is_file()]}
+                   for d in sorted(RELEASES.iterdir(), reverse=True) if d.is_dir()]
+            return self.send(out)
+        if p.startswith("/dl/") and RELEASES:
+            f = RELEASES.joinpath(*p.split("/")[2:])
+            if f.is_file() and RELEASES.resolve() in f.resolve().parents:
+                body = f.read_bytes()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/octet-stream")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
         if p == "/gemini/models":
             return self.send({"models": [{"name": "models/gemini-3.8-flash", "supportedGenerationMethods": ["generateContent"]}]})
         self.send({"error": {"code": 404, "message": f"mock: no route {p}"}}, 404)

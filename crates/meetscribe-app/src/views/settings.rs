@@ -2,7 +2,7 @@
 
 use crate::app::MeetApp;
 use crate::theme::{self, icon, pal};
-use crate::worker::{Cmd, Worker};
+use crate::worker::{Cmd, UpdateStatus, Worker};
 use egui::{RichText, Ui};
 use meetscribe_core::claude_code;
 use meetscribe_core::config::{LlmProvider, Settings};
@@ -153,6 +153,7 @@ pub fn show(app: &mut MeetApp, ui: &mut Ui) {
     let mut keys_changed = false;
     let mut save = false;
     let mut reset = false;
+    let mut update_action = None;
     egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
         ui.set_max_width(900.0);
         let p = pal(ui);
@@ -332,6 +333,10 @@ pub fn show(app: &mut MeetApp, ui: &mut Ui) {
             ui.checkbox(&mut d.deny_data_collection, "OpenRouter 只路由到不保留、不拿資料訓練的供應商（可能使部分模型無法使用）");
         });
 
+        theme::section(ui, "關於與更新", |ui| {
+            about_and_update(ui, app_update_view(&app.update, &app.device_id), &mut f.draft.auto_update, &mut update_action);
+        });
+
         theme::section(ui, "進階", |ui| {
             let d = &mut f.draft;
             let l = theme::label(ui, "ffmpeg 位置（空白＝自動尋找）");
@@ -376,6 +381,15 @@ pub fn show(app: &mut MeetApp, ui: &mut Ui) {
     if keys_changed {
         app.refresh_key_flags();
     }
+    match update_action {
+        Some(UpdateAction::Check) => app.worker.send(Cmd::CheckUpdate { manual: true }),
+        Some(UpdateAction::InstallNow) => app.install_update_now(ui.ctx()),
+        Some(UpdateAction::CopyId) => {
+            ui.ctx().copy_text(format!("語音轉錄 裝置識別碼 {}（電腦版 {}）", app.device_id, crate::worker::VERSION));
+            app.toast("識別碼已複製", false);
+        }
+        None => {}
+    }
     if reset {
         app.settings_form.draft = Settings::default();
     }
@@ -388,5 +402,85 @@ pub fn show(app: &mut MeetApp, ui: &mut Ui) {
             ui.ctx().set_zoom_factor(app.settings.ui_scale);
         }
         app.toast("設定已儲存", false);
+    }
+}
+
+pub(crate) enum UpdateAction {
+    Check,
+    InstallNow,
+    CopyId,
+}
+
+pub(crate) struct UpdateView<'a> {
+    status: &'a UpdateStatus,
+    device_id: &'a str,
+}
+
+fn app_update_view<'a>(status: &'a UpdateStatus, device_id: &'a str) -> UpdateView<'a> {
+    UpdateView { status, device_id }
+}
+
+/// 版本、本機識別碼（發佈者用它單獨推送）、自動更新開關、檢查更新與目前狀態。
+fn about_and_update(ui: &mut Ui, v: UpdateView<'_>, auto: &mut bool, action: &mut Option<UpdateAction>) {
+    let p = pal(ui);
+    ui.horizontal(|ui| {
+        ui.label(theme::bold(format!("語音轉錄 {}", crate::worker::VERSION), 15.0));
+        ui.label(RichText::new("電腦版").color(p.text_muted));
+    });
+    ui.add_space(4.0);
+    ui.horizontal(|ui| {
+        ui.label("本機識別碼");
+        ui.label(RichText::new(v.device_id).monospace().strong());
+        if theme::button(ui, Some(icon::COPY), "複製")
+            .on_hover_text("要單獨推送更新給這台時，把識別碼傳給發佈者")
+            .clicked()
+        {
+            *action = Some(UpdateAction::CopyId);
+        }
+    });
+    ui.add_space(6.0);
+    ui.checkbox(auto, "自動更新（背景下載新版，關閉程式時安裝）");
+    if let Some(why) = crate::updater::self_install_blocker() {
+        theme::hint(ui, why);
+    }
+    ui.add_space(6.0);
+    ui.horizontal(|ui| {
+        let checking = matches!(v.status, UpdateStatus::Checking | UpdateStatus::Downloading { .. });
+        if ui
+            .add_enabled_ui(!checking, |ui| theme::button(ui, Some(icon::REFRESH), "檢查更新"))
+            .inner
+            .clicked()
+        {
+            *action = Some(UpdateAction::Check);
+        }
+        match v.status {
+            UpdateStatus::Idle => {}
+            UpdateStatus::Checking => {
+                ui.spinner();
+                ui.label("檢查中…");
+            }
+            UpdateStatus::Downloading { version, done, total } => {
+                ui.spinner();
+                let pct = if *total > 0 { *done as f64 * 100.0 / *total as f64 } else { 0.0 };
+                ui.label(format!("下載 {version} 中… {pct:.0}%"));
+            }
+            UpdateStatus::Latest => {
+                ui.label(RichText::new(format!("目前已是最新版：{}", crate::worker::VERSION)).color(p.success));
+            }
+            UpdateStatus::Ready(r) => {
+                ui.label(RichText::new(format!("新版 {} 已下載好", r.version)).color(p.accent_strong));
+                if theme::primary(ui, Some(icon::DOWNLOAD), "立即更新並重新開啟", true).clicked() {
+                    *action = Some(UpdateAction::InstallNow);
+                }
+            }
+            UpdateStatus::Failed(e) => {
+                ui.label(RichText::new(format!("檢查失敗：{e}")).color(p.danger));
+            }
+        }
+    });
+    if let UpdateStatus::Ready(r) = v.status
+        && !r.notes.trim().is_empty()
+    {
+        theme::hint(ui, &format!("這版的改變：{}", r.notes.trim()));
     }
 }

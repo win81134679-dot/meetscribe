@@ -15,6 +15,7 @@ use meetscribe_core::openrouter::OpenRouter;
 use meetscribe_core::pipeline::{Engine, Event, EventSink, LogLevel};
 use meetscribe_core::secrets::{self, ApiKeys, KeyKind};
 use meetscribe_core::store::ProjectStore;
+use meetscribe_core::update::{self, Outcome, Platform, UpdateState};
 use serde_json::{Value, json};
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
@@ -33,7 +34,7 @@ pub struct Bridge {
 
 struct Shared {
     paths: AppPaths,
-    /// 匯出檔的預設資料夾（App 的外部檔案區，分享時由 FileProvider 開放）。
+    /// 匯出檔的預設資料夾：公開的「文件/語音轉錄」（檔案 App 看得到）；寫不進去時 Kotlin 給 App 的外部檔案區。
     exports_dir: PathBuf,
     /// Kotlin 匯入的錄音副本放這裡；處理完成後刪掉。
     imports_dir: PathBuf,
@@ -70,9 +71,9 @@ impl Bridge {
             std::fs::create_dir_all(d).map_err(|e| format!("無法建立 {}：{e}", d.display()))?;
         }
         let mut settings = Settings::load(&paths);
-        // 桌面的「空白＝原始錄音旁邊」在手機上是 App 內部資料夾，看不到；改成匯出資料夾
-        if settings.export.dir.trim().is_empty() {
-            settings.export.dir = exports_dir.to_string_lossy().into_owned();
+        // 桌面的「空白＝原始錄音旁邊」在手機上是 App 內部資料夾，看不到；改成匯出資料夾。
+        // 1.0.0 的預設是 App 的外部檔案區（Android/data/…，Android 11 起檔案 App 看不到）：換到公開資料夾
+        if migrate_export_dir(&mut settings, &exports_dir) {
             let _ = settings.save(&paths);
         }
         let rt = tokio::runtime::Builder::new_multi_thread()
@@ -104,6 +105,7 @@ impl Bridge {
             }
         }
         shared.clean_imports(&projects);
+        rt.spawn(upgrade_projects(shared.clone()));
         Ok(Self { rt, shared })
     }
 
@@ -145,7 +147,60 @@ impl Bridge {
                 "exports_dir": s.exports_dir,
                 "imports_dir": s.imports_dir,
                 "version": env!("CARGO_PKG_VERSION"),
+                "device_id": update::device_id(&s.paths.root),
             })),
+            // App 啟動時叫一次：識別碼、剛從哪版更新上來（只回報一次）、已下載好等著安裝的新版
+            "update_info" => {
+                let version = str_field(req, "version")?;
+                let mut state = UpdateState::load(&s.paths.root);
+                let updated_from = state.note_version(version);
+                let _ = state.save(&s.paths.root);
+                Ok(json!({
+                    "device_id": update::device_id(&s.paths.root),
+                    "updated_from": updated_from,
+                    "ready": state.ready_for(version),
+                    // 距上次檢查滿 20 小時：開著自動更新的話 Kotlin 接著叫 check_update
+                    "due": state.due(20),
+                }))
+            }
+            // 檢查並下載新版；結果是 "update" 事件（status：checking／downloading／latest／ready／failed）
+            "check_update" => {
+                let version = str_field(req, "version")?.to_string();
+                let manual = req["manual"].as_bool().unwrap_or(false);
+                let sh = s.clone();
+                self.rt.spawn(async move {
+                    sh.emit(json!({ "type": "update", "status": "checking", "manual": manual }));
+                    let progress_sh = sh.clone();
+                    let mut last = std::time::Instant::now() - Duration::from_secs(1);
+                    let mut progress = move |v: &str, done: u64, total: u64| {
+                        if last.elapsed() >= Duration::from_millis(300) || done == total {
+                            last = std::time::Instant::now();
+                            progress_sh.emit(json!({
+                                "type": "update", "status": "downloading", "manual": manual,
+                                "version": v, "done": done, "total": total,
+                            }));
+                        }
+                    };
+                    let r = update::check_and_download(
+                        &sh.paths.root,
+                        &sh.settings(),
+                        &version,
+                        Platform::Android,
+                        &CancellationToken::new(),
+                        &mut progress,
+                    )
+                    .await;
+                    sh.emit(match r {
+                        Ok(Outcome::Latest) => json!({ "type": "update", "status": "latest", "manual": manual, "version": version }),
+                        Ok(Outcome::Ready(r)) => json!({
+                            "type": "update", "status": "ready", "manual": manual,
+                            "version": r.version, "notes": r.notes, "path": r.path, "targeted": r.targeted,
+                        }),
+                        Err(e) => json!({ "type": "update", "status": "failed", "manual": manual, "error": e.to_string() }),
+                    });
+                });
+                Ok(Value::Null)
+            }
             "list_projects" => {
                 let mut list = s.store().list();
                 list.sort_by_key(|p| std::cmp::Reverse(p.created_at));
@@ -215,9 +270,7 @@ impl Bridge {
                     Some(v) => serde_json::from_value(v.clone()).map_err(|e| format!("匯出選項格式錯誤：{e}"))?,
                     None => p.options.export.clone().unwrap_or_else(|| s.settings().export),
                 };
-                if opts.dir.trim().is_empty() {
-                    opts.dir = s.exports_dir.to_string_lossy().into_owned();
-                }
+                s.fix_export_dir(&mut opts);
                 let files = export::export_project(&p, &opts).map_err(|e| e.to_string())?;
                 Ok(json!(files))
             }
@@ -463,6 +516,29 @@ impl Shared {
         }
     }
 
+    /// 匯出選項的資料夾：空白或還指在 1.0 的私有區（每場會議建立時會複製一份選項）時換成公開資料夾，
+    /// 並照 1.1 的預設每場會議一個子資料夾（同設定檔的 schema 2 遷移）。
+    fn fix_export_dir(&self, opts: &mut ExportOptions) {
+        let old = opts.dir.clone();
+        let mut probe = Settings { export: opts.clone(), ..Settings::default() };
+        if migrate_export_dir(&mut probe, &self.exports_dir) {
+            opts.dir = probe.export.dir;
+            if !old.trim().is_empty() {
+                opts.subfolder = true;
+            }
+        }
+    }
+
+    /// 這場會議的匯出資料夾（已存在才給）：依目前輸出選項算出來的位置；還沒有的話，以前匯出過的檔所在處
+    /// （1.0 的檔還在舊的私有區，新匯出會放到公開資料夾，以新的為準）。
+    fn meeting_folder(&self, p: &Project) -> Option<PathBuf> {
+        let mut opts = p.options.export.clone().unwrap_or_else(|| self.settings().export);
+        self.fix_export_dir(&mut opts);
+        Some(opts.target_dir(p))
+            .filter(|d| d.is_dir())
+            .or_else(|| p.exported.iter().find_map(|f| f.parent().filter(|d| d.is_dir()).map(PathBuf::from)))
+    }
+
     /// 清單用：不含逐字稿。
     fn summary_view(&self, p: &Project) -> Value {
         let busy = self.is_busy(p.id);
@@ -491,8 +567,7 @@ impl Shared {
         let mut v = self.summary_view(p);
         let store = self.store();
         let audio = p
-            .audio_file
-            .as_ref()
+            .playback_audio()
             .map(|rel| store.path_in(p.id, rel))
             .filter(|f| f.is_file());
         let done_chunks = p.chunks.iter().filter(|c| c.stt.is_some()).count();
@@ -522,6 +597,7 @@ impl Shared {
             "models": p.models,
             "warnings": p.warnings,
             "exported": p.exported,
+            "folder": self.meeting_folder(p),
             "stages": Stage::ALL.iter().map(|s| json!({ "id": s, "label": s.label() })).collect::<Vec<_>>(),
         });
         if let (Value::Object(a), Value::Object(b)) = (&mut v, extra) {
@@ -529,6 +605,45 @@ impl Shared {
         }
         v
     }
+}
+
+/// 1.1 之前處理的會議升級一次（不呼叫 API）：重新對齊每句的時間、補做播放音訊（匯入檔還在時）。同桌面 worker。
+async fn upgrade_projects(shared: Arc<Shared>) {
+    let Ok(audio) = AudioTool::locate("") else { return };
+    let store = shared.store();
+    let cancel = CancellationToken::new();
+    for mut p in store.list() {
+        if p.segments.is_empty() || shared.is_busy(p.id) {
+            continue;
+        }
+        let dir = store.dir(p.id);
+        let retimed = meetscribe_core::pipeline::retime_project(&audio, &dir, &mut p, &cancel).await.unwrap_or(false);
+        let playback = meetscribe_core::pipeline::ensure_playback(&audio, &dir, &mut p, &cancel).await.unwrap_or(false);
+        // 每場會議自己那份輸出選項也從 1.0 的私有區搬到公開資料夾（之後續跑、自動匯出才會放對地方）
+        let moved = match p.options.export.as_mut() {
+            Some(ex) => {
+                let before = ex.dir.clone();
+                shared.fix_export_dir(ex);
+                ex.dir != before
+            }
+            None => false,
+        };
+        if (retimed || playback || moved) && store.save(&p).is_ok() {
+            shared.emit(json!({ "type": "updated", "project": shared.full_view(&p) }));
+        }
+    }
+}
+
+/// 匯出資料夾沒設、或還指在 App 的外部檔案區（`…/Android/data/…`，檔案 App 看不到）而現在有公開資料夾可用：換過去。
+fn migrate_export_dir(settings: &mut Settings, exports_dir: &std::path::Path) -> bool {
+    let current = settings.export.dir.trim();
+    let private = |d: &str| d.replace('\\', "/").contains("/Android/data/");
+    let target = exports_dir.to_string_lossy();
+    if current.is_empty() || (private(current) && !private(&target) && current != target) {
+        settings.export.dir = target.into_owned();
+        return true;
+    }
+    false
 }
 
 /// 一次跑一個專案：避免同時打爆 API 額度，也讓進度清楚。
@@ -730,12 +845,69 @@ mod tests {
         let files: Vec<PathBuf> = serde_json::from_value(files).unwrap();
         assert!(!files.is_empty());
         assert!(files.iter().all(|f| f.starts_with(dir.path().join("exports")) && f.is_file()));
+        // 預設每場會議一個子資料夾；專案頁的「開啟資料夾」用 folder
+        let folder = dir.path().join("exports").join("週會");
+        assert!(files.iter().all(|f| f.parent() == Some(folder.as_path())));
+        let v = ok(&b, json!({ "op": "load_project", "id": id }));
+        assert_eq!(PathBuf::from(v["folder"].as_str().unwrap()), folder);
 
         let list = ok(&b, json!({ "op": "list_projects" }));
         assert_eq!(list.as_array().unwrap().len(), 1);
         ok(&b, json!({ "op": "delete_project", "id": id }));
         assert!(!src.parent().unwrap().exists(), "匯入的副本（含資料夾）跟著刪掉");
         assert_eq!(ok(&b, json!({ "op": "list_projects" })).as_array().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn export_dir_moves_from_app_private_area_to_public_documents() {
+        let public = PathBuf::from("/storage/emulated/0/Documents/語音轉錄");
+        let old = "/storage/emulated/0/Android/data/io.github.win81134679.meetscribe/files/exports";
+        let mut s = Settings::default();
+        s.export.dir = old.into();
+        assert!(migrate_export_dir(&mut s, &public));
+        assert_eq!(s.export.dir, public.to_string_lossy());
+        // 使用者自己選的資料夾不動；公開資料夾不能用（Kotlin 退回私有區）時也不動
+        s.export.dir = "/storage/emulated/0/Download/會議".into();
+        assert!(!migrate_export_dir(&mut s, &public));
+        s.export.dir = old.into();
+        assert!(!migrate_export_dir(&mut s, std::path::Path::new(old)));
+        s.export.dir = String::new();
+        assert!(migrate_export_dir(&mut s, &public));
+    }
+
+    #[test]
+    fn old_meeting_options_export_to_the_public_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        let public = dir.path().join("Documents/語音轉錄");
+        let b = Bridge::new(dir.path().join("data"), public.clone()).unwrap();
+        let mut opts = ExportOptions {
+            dir: "/storage/emulated/0/Android/data/io.github.win81134679.meetscribe/files/exports".into(),
+            subfolder: false,
+            ..ExportOptions::default()
+        };
+        b.shared.fix_export_dir(&mut opts);
+        assert_eq!(PathBuf::from(&opts.dir), public);
+        assert!(opts.subfolder, "1.0 的會議也照新預設一場一個資料夾");
+        let mut mine = ExportOptions { dir: "/storage/emulated/0/Download".into(), subfolder: false, ..ExportOptions::default() };
+        b.shared.fix_export_dir(&mut mine);
+        assert_eq!(mine.dir, "/storage/emulated/0/Download", "使用者自選的不動");
+        assert!(!mine.subfolder);
+    }
+
+    #[test]
+    fn update_info_reports_device_and_version_change_once() {
+        let (_dir, b) = bridge();
+        let first = ok(&b, json!({ "op": "update_info", "version": "1.0.0" }));
+        let id = first["device_id"].as_str().unwrap().to_string();
+        assert!(update::is_device_id(&id));
+        assert!(first["updated_from"].is_null());
+        assert!(first["ready"].is_null());
+        let st = ok(&b, json!({ "op": "state" }));
+        assert_eq!(st["device_id"], id.as_str());
+        let after = ok(&b, json!({ "op": "update_info", "version": "1.1.0" }));
+        assert_eq!(after["updated_from"], "1.0.0");
+        assert_eq!(after["device_id"], id.as_str());
+        assert!(ok(&b, json!({ "op": "update_info", "version": "1.1.0" }))["updated_from"].is_null());
     }
 
     #[test]

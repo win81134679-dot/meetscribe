@@ -78,7 +78,7 @@ pub fn show(app: &mut MeetApp, ui: &mut Ui, id: Uuid) {
     };
     let busy = app.busy.contains(&id);
     let mut actions: Vec<Action> = Vec::new();
-    let audio_path = app.projects[idx].audio_file.as_ref().map(|a| app.store.path_in(id, a));
+    let audio_path = app.projects[idx].playback_audio().map(|a| app.store.path_in(id, a));
     let playing_main = app
         .player
         .as_ref()
@@ -453,7 +453,7 @@ fn transcript_tab(
     actions: &mut Vec<Action>,
 ) {
     let pl = pal(ui);
-    let audio = p.audio_file.clone();
+    let audio = p.playback_audio().map(str::to_string);
     theme::card(ui, |ui| {
         ui.horizontal_wrapped(|ui| {
             ui.label(theme::ic(icon::SEARCH, 14.0).color(pl.text_muted));
@@ -845,9 +845,9 @@ fn speakers_tab(ui: &mut Ui, p: &mut Project, st: &mut ProjectUi, editable: bool
     if let Some(target) = play {
         match target.strip_prefix('@') {
             Some(secs) => {
-                if let Some(a) = &p.audio_file {
+                if let Some(a) = p.playback_audio() {
                     actions.push(Action::Play {
-                        file: a.clone(),
+                        file: a.to_string(),
                         secs: secs.parse().unwrap_or(0.0),
                     });
                 }
