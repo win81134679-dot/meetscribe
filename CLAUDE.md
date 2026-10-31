@@ -9,6 +9,17 @@ repo `win81134679-dot/meetscribe`（2026-10-30 建，分支 `main`；**2026-10-3
 本 repo 的提交身分設在 local config：`win81134679-dot` ＋ GitHub noreply 信箱（全域沒設 user.email）。
 `.gitattributes` 固定 LF，只有 `.cmd`、`.bat`（`android/gradlew.bat`）、`.url` 是 CRLF；`target/`、`dist/` 與 `android/` 的建置產物、簽章檔不進版控（`android/.gitignore`）。推之前掃一次祕密（`sk-or-`、`AIza`、`gh?_`）。
 
+## Y: 備份
+
+2026-10-31 使用者：「做完備份到Y:」。NAS 的 `Y:. NVIDIA Nemotron 3.5 Transcribe 逐字稿轉錄模型`（Y: 的資料夾照編號，Filee 是 4）。
+發佈新版或動到簽章檔之後跑一次（結束碼 0–3 是成功、≥8 才是失敗）：
+
+```powershell
+$src = "$PWD"; robocopy $src "Y:. NVIDIA Nemotron 3.5 Transcribe 逐字稿轉錄模型" /MIR /XD "$src	arget" "$srcndroid\.gradle" "$srcndroid\.kotlin" "$srcndroiduild" "$srcndroidppuild" "$srcndroidpp\src\main\jniLibs" /R:2 /W:3 /NFL /NDL /NP /XJ
+```
+
+不備份的都能重建。`keys\`（更新簽章）與 `android\keystore*`（APK 簽章）的另一份就在 Y:；**只能本機 → Y:，絕不拿 Y: 那份蓋回本機**。
+
 ## 地圖
 
 - `crates/meetscribe-core`：全部邏輯。`pipeline.rs` 串起五個階段（前處理→轉錄→說話者分配→整合→摘要），每階段完成就存檔、可續跑。
