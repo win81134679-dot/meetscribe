@@ -20,6 +20,8 @@ pub struct SettingsForm {
     g_models: Option<Result<Vec<String>, String>>,
     ffmpeg: Option<Result<String, String>>,
     model_filter: String,
+    /// 在設定頁按了 Ctrl+S（app.rs 收到鍵盤事件，這頁畫的時候存）。
+    pub(crate) save_requested: bool,
 }
 
 impl SettingsForm {
@@ -34,6 +36,7 @@ impl SettingsForm {
             g_models: None,
             ffmpeg: None,
             model_filter: String::new(),
+            save_requested: false,
         }
     }
     pub fn key_test_result(&mut self, kind: KeyKind, r: Result<String, String>) {
@@ -155,7 +158,10 @@ pub fn show(app: &mut MeetApp, ui: &mut Ui) {
     let mut reset = false;
     let mut update_action = None;
     let mut rename_device: Option<String> = None;
-    egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+    // 「儲存設定」固定在頁面底部，不用捲到最下面（2026-10-31 使用者：「設定無法快速到最下面儲存設定很困擾」）
+    const FOOTER: f32 = 64.0;
+    let scroll_h = (ui.available_height() - FOOTER).max(120.0);
+    egui::ScrollArea::vertical().max_height(scroll_h).auto_shrink([false, false]).show(ui, |ui| {
         ui.set_max_width(900.0);
         let p = pal(ui);
         theme::page_header(ui, "設定", "金鑰存在 Windows 認證管理員，不會寫進任何設定檔。");
@@ -371,18 +377,36 @@ pub fn show(app: &mut MeetApp, ui: &mut Ui) {
             });
         });
 
-        ui.horizontal(|ui| {
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if theme::primary(ui, Some(icon::CHECK), "儲存設定", true).clicked() {
-                    save = true;
-                }
-                if theme::button(ui, None, "還原預設值").clicked() {
-                    reset = true;
-                }
-            });
-        });
         ui.add_space(24.0);
     });
+    let dirty = app.settings_form.draft != app.settings;
+    let p = pal(ui);
+    egui::Frame::NONE
+        .stroke(egui::Stroke::new(1.0, p.border))
+        .fill(p.surface)
+        .corner_radius(theme::RADIUS_SMALL)
+        .inner_margin(egui::Margin::symmetric(16, 10))
+        .show(ui, |ui| {
+            ui.set_max_width(900.0 - 32.0);
+            ui.set_width(ui.available_width().min(900.0 - 32.0));
+            ui.horizontal(|ui| {
+                if dirty {
+                    ui.label(theme::ic(icon::EDIT, 14.0).color(p.accent_strong));
+                    ui.label(RichText::new("有未儲存的變更").color(p.accent_strong));
+                } else {
+                    ui.label(RichText::new("設定都已儲存　·　Ctrl+S 也能儲存").color(p.text_muted));
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if theme::primary(ui, Some(icon::CHECK), "儲存設定", dirty).clicked() {
+                        save = true;
+                    }
+                    if theme::button(ui, None, "還原預設值").on_hover_text("不含金鑰、這台的名稱與中轉站；按「儲存設定」才生效").clicked() {
+                        reset = true;
+                    }
+                });
+            });
+        });
+    save |= std::mem::take(&mut app.settings_form.save_requested);
     if keys_changed && !app.transfer.peers.is_empty() {
         // 配對後自動同步金鑰（2026-10-31 使用者：「配對後就同步喔！」）
         app.worker.send(Cmd::Transfer(TransferCmd::SyncKeys { manual: false }));
@@ -400,7 +424,9 @@ pub fn show(app: &mut MeetApp, ui: &mut Ui) {
         None => {}
     }
     if reset {
-        app.settings_form.draft = Settings::default();
+        // 這台的名稱與中轉站設定不算「預設值」的一部分（名稱在「傳到其他裝置」另外存）
+        let keep = &app.settings_form.draft;
+        app.settings_form.draft = Settings { device_name: keep.device_name.clone(), relay_url: keep.relay_url.clone(), ..Settings::default() };
     }
     if let Some(name) = rename_device {
         let mut s = app.settings.clone();

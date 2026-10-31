@@ -634,8 +634,12 @@ impl eframe::App for MeetApp {
             }
         }
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::S)) {
-            self.save_now();
-            self.toast("已存檔", false);
+            if self.view == View::Settings {
+                self.settings_form.save_requested = true;
+            } else {
+                self.save_now();
+                self.toast("已存檔", false);
+            }
         }
         // 拖放檔案：一律進新增轉錄
         let dropped: Vec<std::path::PathBuf> = ctx.input(|i| {

@@ -95,6 +95,13 @@ fn render_screens() {
 
     harness.state_mut().view = View::Settings;
     shot(&mut harness, "02_settings");
+    // 改了還沒存：底部固定列顯示「有未儲存的變更」
+    harness.state_mut().settings_form.draft.chunk_minutes += 5;
+    shot(&mut harness, "02b_settings_dirty");
+    {
+        let st = harness.state_mut();
+        st.settings_form.draft = st.settings.clone();
+    }
 
     let id = project.id;
     for (tab, name) in [
