@@ -74,6 +74,8 @@ data class ProjectDetail(
     val options: JSONObject,
     /** 這場會議的匯出資料夾（已存在才有）。 */
     val folder: String?,
+    /** 匯出到手機、還在的檔（刪除會議時可一起刪）。 */
+    val exportFiles: List<String>,
 ) {
     val id get() = summary.id
 
@@ -113,6 +115,7 @@ data class ProjectDetail(
                 exported = o.optJSONArray("exported").strings(),
                 options = o.optJSONObject("options") ?: JSONObject(),
                 folder = o.optStringOrNull("folder"),
+                exportFiles = o.optJSONArray("export_files").strings(),
             )
         }
     }

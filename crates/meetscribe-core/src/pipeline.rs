@@ -33,6 +33,14 @@ const CUT_WINDOW_SECS: f64 = 90.0;
 const MAX_QUEUE_RETRY_ROUNDS: u32 = 6;
 /// 每輪重送前的等待（第 n 輪等 n 倍）。
 const QUEUE_RETRY_WAIT: std::time::Duration = std::time::Duration::from_secs(20);
+/// 說話者分配一次最多等多久（含 HTTP 層的重試與 Retry-After）。10 分鐘的段落 Gemini 通常 30～90 秒回來。
+/// 2026-10-31 使用者：「辨識說話者幫我等待時間縮短 若是辨識不出來就趕快接下去辨識不要卡這麼久」——
+/// 之前一段最多 3 次 ×（HTTP 重試 4 次、Retry-After 不設上限、單次 900 秒），一段失敗可以卡幾十分鐘。
+const ATTRIBUTION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(180);
+/// 每段最多試幾次；第二次只給「再試可能會好」的錯（輸出解析不了、暫時性的 5xx），逾時或 400 不重試。
+const ATTRIBUTION_ATTEMPTS: u32 = 2;
+/// 連續幾段辨識失敗就不再呼叫模型，剩下的段落先不分說話者、直接往下做（之後可在會議頁「重新辨識說話者」）。
+const ATTRIBUTION_GIVE_UP_AFTER: u32 = 3;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LogLevel {
@@ -78,12 +86,18 @@ pub struct Engine {
     pub notices: Vec<String>,
     /// 轉錄排隊逾時後、每輪重送前的基本等待（測試設成 0）。
     pub queue_retry_wait: std::time::Duration,
+    /// 說話者分配單次上限，見 [`ATTRIBUTION_TIMEOUT`]（測試設短）。
+    pub attribution_timeout: std::time::Duration,
+    /// 連續幾段失敗就不再呼叫模型，見 [`ATTRIBUTION_GIVE_UP_AFTER`]。
+    pub attribution_give_up_after: u32,
 }
 
 /// 傳進各步驟的共用參數。
 struct Ctx<'a> {
     sink: &'a EventSink,
     cancel: &'a CancellationToken,
+    /// 說話者分配連續失敗的段數（成功就歸零），到 [`ATTRIBUTION_GIVE_UP_AFTER`] 就不再呼叫模型。
+    attribution_failures: std::sync::atomic::AtomicU32,
 }
 
 impl Ctx<'_> {
@@ -203,6 +217,8 @@ impl Engine {
             stt_caps: caps,
             notices,
             queue_retry_wait: QUEUE_RETRY_WAIT,
+            attribution_timeout: ATTRIBUTION_TIMEOUT,
+            attribution_give_up_after: ATTRIBUTION_GIVE_UP_AFTER,
             settings,
         })
     }
@@ -227,6 +243,7 @@ impl Engine {
         let ctx = Ctx {
             sink: &sink,
             cancel: &cancel,
+            attribution_failures: Default::default(),
         };
         for n in &self.notices {
             ctx.log(&project, LogLevel::Info, n);
@@ -607,8 +624,28 @@ impl Engine {
         let weights: Vec<usize> = units.iter().map(|u| weight(u)).collect();
 
         // C. 用能聽音訊的模型分配說話者
-        if identify {
-            match self.attribute_with_llm(p, &chunk, &units, ctx).await {
+        use std::sync::atomic::Ordering;
+        let failures = ctx.attribution_failures.load(Ordering::Relaxed);
+        let give_up = self.attribution_give_up_after;
+        if identify && failures >= give_up {
+            if failures == give_up {
+                ctx.attribution_failures.fetch_add(1, Ordering::Relaxed);
+                let msg = format!(
+                    "說話者辨識連續 {give_up} 段失敗，剩下的段落先不標說話者、繼續往下做；完成後可在會議頁按「重新辨識說話者」"
+                );
+                ctx.log(p, LogLevel::Warn, &msg);
+                p.warnings.push(msg);
+            }
+        } else if identify {
+            let started = std::time::Instant::now();
+            let result = self.attribute_with_llm(p, &chunk, &units, ctx).await;
+            if result.is_ok() {
+                ctx.attribution_failures.store(0, Ordering::Relaxed);
+            } else if !matches!(result, Err(Error::Cancelled)) {
+                ctx.attribution_failures.fetch_add(1, Ordering::Relaxed);
+                tracing::info!("第 {} 段說話者辨識失敗，花了 {:.0} 秒", i + 1, started.elapsed().as_secs_f64());
+            }
+            match result {
                 Ok((speakers, anchors)) => {
                     let (times, timing) = match &word_times {
                         Some(t) => (t.clone(), Timing::Provider),
@@ -713,14 +750,27 @@ impl Engine {
         };
         let request = attribution::build_request(&self.prompts, &input);
         let mut last_err = Error::Other("未執行".into());
-        for attempt in 1..=3 {
+        for attempt in 1..=ATTRIBUTION_ATTEMPTS {
             ctx.check()?;
-            let resp = match self.attribution_llm.complete(request.clone(), ctx.cancel).await {
-                Ok(r) => r,
-                Err(Error::Cancelled) => return Err(Error::Cancelled),
-                Err(e) => {
+            let call = self.attribution_llm.complete(request.clone(), ctx.cancel);
+            let resp = match tokio::time::timeout(self.attribution_timeout, call).await {
+                // 等太久就放棄這段（再試多半一樣慢），往下一段
+                Err(_) => {
+                    last_err = Error::Other(format!(
+                        "說話者分配模型 {} 秒沒有回應",
+                        self.attribution_timeout.as_secs()
+                    ));
+                    break;
+                }
+                Ok(Ok(r)) => r,
+                Ok(Err(Error::Cancelled)) => return Err(Error::Cancelled),
+                Ok(Err(e)) => {
+                    let again = e.is_retryable();
                     last_err = e;
-                    continue;
+                    if again {
+                        continue;
+                    }
+                    break;
                 }
             };
             p.usage.llm_usd += resp.cost;
@@ -969,6 +1019,7 @@ impl Engine {
         let ctx = Ctx {
             sink: &sink,
             cancel: &cancel,
+            attribution_failures: Default::default(),
         };
         p.models.summary = self.settings.summary_model.clone();
         self.summarize_into(&mut p, &instructions, &ctx).await?;

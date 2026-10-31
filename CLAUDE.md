@@ -94,6 +94,11 @@ $src = "$PWD"; robocopy $src "Y:\5. NVIDIA Nemotron 3.5 Transcribe 逐字稿轉�
 - Gemini 模型名稱常改版：`gemini::pick_audio_model` 在設定的名字不存在時挑最新的穩定版 Flash，別把模型名寫死在別處。
 - `claude -p`：不能用 `--bare`（只認 ANTHROPIC_API_KEY，訂閱登入會失敗）；用 `--setting-sources project`＋空工作目錄隔離使用者的 hook／plugin。`total_cost_usd` 是牌價換算，記為 0。
 
+## 說話者分配的等待上限
+
+`pipeline.rs` 的 `ATTRIBUTION_TIMEOUT`（180 秒，含 HTTP 層重試與 Retry-After）、`ATTRIBUTION_ATTEMPTS`（2，逾時與不可重試的錯不重試）、
+`ATTRIBUTION_GIVE_UP_AFTER`（連續 3 段失敗後其餘段落不呼叫模型）。使用者 2026-10-31：「辨識不出來就趕快接下去辨識不要卡這麼久」——調大這些數字前先想清楚。
+
 ## 說話者分配的不變式
 
 逐字稿文字只來自 STT。分配模型只回 `[句號, 說話者, 起始秒]`；新人用 `N#`，由 `attribution::map_to_global` 配全域 `S#`。漏標的句子沿用前一位、時間用 `fill_times`（最長非遞減子序列當錨點＋字數內插）。改這段時這條不變式要守住，否則逐字稿會漏字。
@@ -120,6 +125,7 @@ $src = "$PWD"; robocopy $src "Y:\5. NVIDIA Nemotron 3.5 Transcribe 逐字稿轉�
 - 手機沒有 Claude Code CLI，設定頁只給 Google／OpenRouter。
 - 匯出預設在公開的「文件/語音轉錄」（`core/Storage.kt`；寫不進去才退回 App 的外部檔案區）。1.0 存的 `…/Android/data/…` 由 `bridge::migrate_export_dir` 換過去，使用者自選的資料夾不動。
   會議頁「開啟資料夾」用 `DocumentsContract` 的 externalstorage URI 開系統檔案 App（只對共用儲存空間有效）；分享經 FileProvider（`file_paths.xml` 開放 `Documents/`）。
+- 刪除會議可一併刪匯出檔：只刪 `bridge::export_files` 列的（`exported` 記錄＋專屬子資料夾裡檔名以會議開頭的匯出格式），不碰使用者自己放的檔。
 - App 內錄音：`service/RecorderService.kt`（前景服務 microphone，AAC m4a 直接寫進 imports），錄完由 `Recording.finished` 帶進新增轉錄頁。
 - 匯入檔放 `files/data/imports/<uuid>/<原檔名>`；完成或刪除專案時刪掉，App 啟動時清掉沒有專案在用的。
 

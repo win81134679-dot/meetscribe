@@ -536,84 +536,247 @@ impl Exporter for DocxExporter {
     }
 }
 
+/// Word 會議紀錄（2026-10-31 使用者：「docx也要修 我希望把排版...等變得更好」）。
+/// A4、頁首會議名稱、頁尾頁碼；標題區＋會議資訊表；章節標題主色加底線；摘要的條列、待辦方框、編號、引言、表格各有樣式；
+/// 發言者表附顏色與佔比；逐字稿另起一頁，每段「說話者（顏色）＋時間」一行、內文縮排。
 mod docx {
     use super::*;
     use docx_rs::*;
 
     const FONT_EA: &str = "微軟正黑體";
     const FONT_LATIN: &str = "Calibri";
+    /// 主色（同程式介面的薰衣草紫）與深一階的標題色。
+    const ACCENT: &str = "7F77DD";
+    const ACCENT_DARK: &str = "4B4594";
+    const ACCENT_TINT: &str = "EEECFB";
+    const TEXT: &str = "1F2430";
+    const MUTED: &str = "6B7280";
+    const RULE: &str = "E3E1EE";
+    /// 說話者顏色（印出來也看得清楚的深色版，順序同介面）。
+    const SPEAKER_COLORS: [&str; 10] = [
+        "5B54C4", "0E7C66", "C2410C", "B4237A", "1D63C9", "7C3AED", "3F7D1F", "A16207", "0F766E", "BE123C",
+    ];
+    /// A4，單位 twip（1/1440 英吋）。
+    const PAGE_W: u32 = 11906;
+    const PAGE_H: u32 = 16838;
+    const MARGIN: i32 = 1247; // 2.2 cm
+    const BODY_W: usize = (PAGE_W as usize) - 2 * (MARGIN as usize);
 
-    fn heading_style(id: &str, name: &str, size: usize) -> Style {
-        Style::new(id, StyleType::Paragraph).name(name).size(size).bold()
+    fn speaker_color(p: &Project, id: Option<&str>) -> &'static str {
+        let idx = id.and_then(|id| p.speaker(id)).map(|s| s.color).unwrap_or(0);
+        SPEAKER_COLORS[idx % SPEAKER_COLORS.len()]
+    }
+
+    /// 「1 小時 2 分」→「1 小時 2 分」不變；中文排版裡數字與單位之間不需要額外空白。
+    fn duration(sec: f64) -> String {
+        fmt_duration_zh(sec).replace(' ', "")
+    }
+
+    fn spacing(before: u32, after: u32) -> LineSpacing {
+        LineSpacing::new().before(before).after(after)
+    }
+
+    fn bottom_rule(mut p: Paragraph, color: &str, size: usize) -> Paragraph {
+        p.property = p.property.set_borders(
+            ParagraphBorders::with_empty()
+                .set(ParagraphBorder::new(ParagraphBorderPosition::Bottom).val(BorderType::Single).size(size).space(4).color(color)),
+        );
+        p
+    }
+
+    /// 圓點一律用中文字型畫（英文名字前的 ● 才不會變小）。
+    fn dot(color: &str, size: usize) -> Run {
+        Run::new()
+            .add_text("● ")
+            .fonts(RunFonts::new().east_asia(FONT_EA).ascii(FONT_EA).hi_ansi(FONT_EA))
+            .color(color)
+            .size(size)
+    }
+
+    fn styles(doc: Docx) -> Docx {
+        // 章節（會議摘要／發言者／逐字稿）：主色、細底線
+        let mut h1 = Style::new("Heading1", StyleType::Paragraph)
+            .name("heading 1")
+            .size(32)
+            .bold()
+            .color(ACCENT_DARK)
+            .line_spacing(spacing(360, 160))
+            .outline_lvl(0);
+        h1.paragraph_property = h1.paragraph_property.set_borders(
+            ParagraphBorders::with_empty()
+                .set(ParagraphBorder::new(ParagraphBorderPosition::Bottom).val(BorderType::Single).size(6).space(4).color(RULE)),
+        );
+        let h1 = h1;
+        // 頁首頁尾：頁碼欄位跟著段落樣式的字級與顏色
+        doc.add_style(Style::new("Footer", StyleType::Paragraph).name("footer").size(16).color(MUTED))
+            .add_style(h1)
+            .add_style(
+                Style::new("Heading2", StyleType::Paragraph)
+                    .name("heading 2")
+                    .size(28)
+                    .bold()
+                    .color(TEXT)
+                    .line_spacing(spacing(280, 100))
+                    .outline_lvl(1),
+            )
+            .add_style(
+                Style::new("Heading3", StyleType::Paragraph)
+                    .name("heading 3")
+                    .size(24)
+                    .bold()
+                    .color(ACCENT_DARK)
+                    .line_spacing(spacing(240, 80))
+                    .outline_lvl(2),
+            )
+            .add_style(
+                Style::new("Heading4", StyleType::Paragraph)
+                    .name("heading 4")
+                    .size(22)
+                    .bold()
+                    .color(TEXT)
+                    .line_spacing(spacing(200, 60))
+                    .outline_lvl(3),
+            )
     }
 
     pub fn render(p: &Project, o: &ExportOptions) -> Result<Vec<u8>> {
+        let title = doc_title(p, o);
         let mut doc = Docx::new()
+            .page_size(PAGE_W, PAGE_H)
+            .page_margin(
+                PageMargin::new()
+                    .top(MARGIN)
+                    .bottom(MARGIN)
+                    .left(MARGIN)
+                    .right(MARGIN)
+                    .header(620)
+                    .footer(620),
+            )
             .default_fonts(RunFonts::new().east_asia(FONT_EA).ascii(FONT_LATIN).hi_ansi(FONT_LATIN))
             .default_size(22)
-            .add_style(heading_style("Heading1", "heading 1", 36))
-            .add_style(heading_style("Heading2", "heading 2", 30))
-            .add_style(heading_style("Heading3", "heading 3", 26))
-            .add_style(heading_style("Heading4", "heading 4", 24));
+            .default_line_spacing(LineSpacing::new().line(312).line_rule(LineSpacingType::Auto).after(80))
+            .header(Header::new().add_paragraph(
+                Paragraph::new()
+                    .style("Footer")
+                    .align(AlignmentType::Right)
+                    .add_run(Run::new().add_text(&p.title)),
+            ))
+            .footer(Footer::new().add_paragraph(
+                Paragraph::new()
+                    .style("Footer")
+                    .align(AlignmentType::Center)
+                    .add_run(Run::new().add_text("第 "))
+                    .add_page_num(PageNum::new())
+                    .add_run(Run::new().add_text(" 頁／共 "))
+                    .add_num_pages(NumPages::new())
+                    .add_run(Run::new().add_text(" 頁　·　語音轉錄")),
+            ));
+        doc = styles(doc);
+
+        // 標題區
+        let kind = match o.content {
+            Content::SummaryOnly => "會議摘要",
+            Content::TranscriptOnly => "會議逐字稿",
+            _ => "會議紀錄",
+        };
         doc = doc.add_paragraph(
             Paragraph::new()
-                .style("Heading1")
-                .add_run(Run::new().add_text(doc_title(p, o))),
+                .line_spacing(spacing(0, 40))
+                .add_run(Run::new().add_text(kind).size(20).bold().color(ACCENT).character_spacing(40)),
         );
-        if o.header {
-            for m in meta_lines(p) {
-                doc = doc.add_paragraph(Paragraph::new().add_run(Run::new().add_text(m).size(18).color("666666")));
-            }
+        doc = doc.add_paragraph(
+            Paragraph::new()
+                .line_spacing(spacing(0, 60))
+                .add_run(Run::new().add_text(&title).size(48).bold().color(TEXT)),
+        );
+        let mut sub = vec![p.created_at.format("%Y-%m-%d %H:%M").to_string()];
+        if p.duration > 0.0 {
+            sub.push(duration(p.duration));
         }
+        if !p.speakers.is_empty() {
+            sub.push(format!("{} 位發言者", p.speakers.len()));
+        }
+        doc = doc.add_paragraph(bottom_rule(
+            Paragraph::new()
+                .line_spacing(spacing(0, 240))
+                .add_run(Run::new().add_text(sub.join("　·　")).size(20).color(MUTED)),
+            ACCENT,
+            12,
+        ));
+        if o.header {
+            doc = doc.add_table(info_table(p));
+        }
+
         if o.content.summary()
             && let Some(sum) = &p.summary
         {
-            doc = doc.add_paragraph(
-                Paragraph::new()
-                    .style("Heading2")
-                    .add_run(Run::new().add_text("會議摘要")),
-            );
-            doc = markdown_into(doc, &sum.markdown);
+            doc = doc.add_paragraph(heading("會議摘要"));
+            doc = markdown_into(doc, &sum.markdown, &p.title);
         }
         if !o.content.transcript() {
             return pack(doc);
         }
         if o.header && !p.speakers.is_empty() {
-            doc = doc.add_paragraph(
-                Paragraph::new()
-                    .style("Heading2")
-                    .add_run(Run::new().add_text("發言者")),
-            );
-            let mut table_rows = vec![row(&["說話者", "發言時間", "句數"], true)];
-            for (id, secs, count) in p.speaker_stats() {
-                table_rows.push(row(
-                    &[&p.speaker_name(Some(&id)), &fmt_duration_zh(secs), &count.to_string()],
-                    false,
-                ));
-            }
-            doc = doc.add_table(Table::new(table_rows));
+            doc = doc.add_paragraph(heading("發言者"));
+            doc = doc.add_table(speaker_table(p));
         }
-        doc = doc.add_paragraph(
-            Paragraph::new()
-                .style("Heading2")
-                .add_run(Run::new().add_text("逐字稿")),
-        );
-        for (start, name, text) in turns(p, o) {
-            let mut para = Paragraph::new();
-            if o.timestamps {
-                para = para.add_run(
-                    Run::new()
-                        .add_text(format!("[{}] ", fmt_hms(start)))
-                        .color("888888")
-                        .size(18),
-                );
+        // 有摘要時逐字稿另起一頁，印出來好分開
+        let mut h = heading("逐字稿");
+        if o.content.summary() && p.summary.is_some() {
+            h = h.page_break_before(true);
+        }
+        doc = doc.add_paragraph(h);
+        for (start, name, text, speaker) in turns_with_speaker(p, o) {
+            let has_meta = !name.is_empty() || o.timestamps;
+            if has_meta {
+                let mut meta = Paragraph::new().keep_next(true).line_spacing(spacing(160, 20));
+                if !name.is_empty() {
+                    let color = speaker_color(p, speaker.as_deref());
+                    meta = meta
+                        .add_run(dot(color, 21))
+                        .add_run(Run::new().add_text(&name).bold().size(21).color(color));
+                }
+                if o.timestamps {
+                    let gap = if name.is_empty() { "" } else { "　" };
+                    meta = meta.add_run(Run::new().add_text(format!("{gap}{}", fmt_hms(start))).size(17).color(MUTED));
+                }
+                doc = doc.add_paragraph(meta);
             }
-            if !name.is_empty() {
-                para = para.add_run(Run::new().add_text(format!("{name}：")).bold());
-            }
-            doc = doc.add_paragraph(para.add_run(Run::new().add_text(text)));
+            let body = Paragraph::new()
+                .indent(Some(if has_meta { 300 } else { 0 }), None, None, None)
+                .line_spacing(spacing(0, if has_meta { 60 } else { 120 }))
+                .add_run(Run::new().add_text(text).color(TEXT));
+            doc = doc.add_paragraph(body);
         }
         pack(doc)
+    }
+
+    fn heading(text: &str) -> Paragraph {
+        Paragraph::new().style("Heading1").keep_next(true).add_run(Run::new().add_text(text))
+    }
+
+    /// 同 [`turns`]，多帶說話者 ID（決定顏色）。
+    fn turns_with_speaker(p: &Project, o: &ExportOptions) -> Vec<(f64, String, String, Option<String>)> {
+        let mut out: Vec<(f64, String, String, Option<String>)> = Vec::new();
+        for s in &p.segments {
+            if o.merge_turns
+                && let Some(t) = out.last_mut()
+                && t.3 == s.speaker
+            {
+                if crate::model::needs_space(&t.2, &s.text) {
+                    t.2.push(' ');
+                }
+                t.2.push_str(&s.text);
+                continue;
+            }
+            let name = if o.speaker_names && s.speaker.is_some() {
+                p.speaker_name(s.speaker.as_deref())
+            } else {
+                String::new()
+            };
+            out.push((s.start, name, s.text.clone(), s.speaker.clone()));
+        }
+        out
     }
 
     fn pack(doc: Docx) -> Result<Vec<u8>> {
@@ -624,74 +787,178 @@ mod docx {
         Ok(buf.into_inner())
     }
 
-    fn row(cells: &[&str], header: bool) -> TableRow {
-        TableRow::new(
-            cells
-                .iter()
-                .map(|c| {
-                    let mut run = Run::new().add_text(*c);
-                    if header {
-                        run = run.bold();
-                    }
-                    let mut cell = TableCell::new().add_paragraph(Paragraph::new().add_run(run));
-                    if header {
-                        cell = cell.shading(Shading::new().fill("E8EEF4"));
-                    }
-                    cell
-                })
-                .collect(),
-        )
+    fn light_borders() -> TableBorders {
+        let b = |pos| TableBorder::new(pos).border_type(BorderType::Single).size(4).color(RULE);
+        TableBorders::with_empty()
+            .set(b(TableBorderPosition::Top))
+            .set(b(TableBorderPosition::Bottom))
+            .set(b(TableBorderPosition::InsideH))
+            .set(b(TableBorderPosition::Left))
+            .set(b(TableBorderPosition::Right))
+            .set(b(TableBorderPosition::InsideV))
     }
 
-    /// 摘要的 Markdown 轉 Word：標題、條列、表格、**粗體**。
-    fn markdown_into(mut doc: Docx, md: &str) -> Docx {
+    fn table(rows: Vec<TableRow>, grid: Vec<usize>) -> Table {
+        Table::new(rows)
+            .set_grid(grid)
+            .width(BODY_W, WidthType::Dxa)
+            .layout(TableLayoutType::Fixed)
+            .set_borders(light_borders())
+            .margins(TableCellMargins::new().margin(50, 120, 50, 120))
+    }
+
+    fn cell(runs: Vec<Run>, width: usize, fill: Option<&str>) -> TableCell {
+        let mut para = Paragraph::new().line_spacing(spacing(0, 0));
+        for r in runs {
+            para = para.add_run(r);
+        }
+        let mut c = TableCell::new()
+            .add_paragraph(para)
+            .width(width, WidthType::Dxa)
+            .vertical_align(VAlignType::Center);
+        if let Some(f) = fill {
+            c = c.shading(Shading::new().fill(f));
+        }
+        c
+    }
+
+    /// 會議資訊：左欄淡紫底的欄名、右欄內容。日期、長度、人數已在標題下，這裡放來源與用了哪些模型。
+    fn info_table(p: &Project) -> Table {
+        let key_w = 1900;
+        let val_w = BODY_W - key_w;
+        let source = meta_lines(p)
+            .into_iter()
+            .find_map(|l| l.strip_prefix("原始檔案：").map(str::to_string))
+            .unwrap_or_default();
+        let mut items = vec![("原始檔案".to_string(), source)];
+        for (k, v) in [
+            ("逐字稿模型", &p.models.stt),
+            ("說話者辨識", &p.models.attribution),
+            ("摘要模型", &p.models.summary),
+        ] {
+            if !v.trim().is_empty() && !(k == "摘要模型" && p.summary.is_none()) {
+                items.push((k.to_string(), v.clone()));
+            }
+        }
+        let rows: Vec<TableRow> = items
+            .into_iter()
+            .map(|(k, v)| {
+                TableRow::new(vec![
+                    cell(vec![Run::new().add_text(k).size(19).color(MUTED)], key_w, Some(ACCENT_TINT)),
+                    cell(vec![Run::new().add_text(v).size(19).color(TEXT)], val_w, None),
+                ])
+            })
+            .collect();
+        table(rows, vec![key_w, val_w])
+    }
+
+    /// 發言者：顏色圓點＋名字、發言時間、佔比、段數。
+    fn speaker_table(p: &Project) -> Table {
+        let w = [BODY_W - 3 * 1700, 1700, 1700, 1700];
+        let head = |t: &str, w: usize| cell(vec![Run::new().add_text(t).bold().size(19).color(ACCENT_DARK)], w, Some(ACCENT_TINT));
+        let mut rows = vec![TableRow::new(vec![
+            head("說話者", w[0]),
+            head("發言時間", w[1]),
+            head("佔比", w[2]),
+            head("句數", w[3]),
+        ])];
+        let stats = p.speaker_stats();
+        let total: f64 = stats.iter().map(|s| s.1).sum::<f64>().max(1e-9);
+        for (id, secs, count) in stats {
+            let color = speaker_color(p, Some(&id));
+            rows.push(TableRow::new(vec![
+                cell(
+                    vec![dot(color, 19), Run::new().add_text(p.speaker_name(Some(&id))).size(19).color(TEXT)],
+                    w[0],
+                    None,
+                ),
+                cell(vec![Run::new().add_text(duration(secs)).size(19)], w[1], None),
+                cell(vec![Run::new().add_text(format!("{:.0}%", secs / total * 100.0)).size(19)], w[2], None),
+                cell(vec![Run::new().add_text(count.to_string()).size(19)], w[3], None),
+            ]));
+        }
+        table(rows, w.to_vec())
+    }
+
+    /// 摘要的 Markdown 轉 Word：標題、條列、待辦方框、編號、引言、表格、**粗體**。
+    /// 摘要第一行常是跟文件標題一樣的 `# 標題`，重複的略過。
+    fn markdown_into(mut doc: Docx, md: &str, title: &str) -> Docx {
         let lines: Vec<&str> = md.lines().collect();
         let mut i = 0;
+        let mut first_heading = true;
         while i < lines.len() {
             let line = lines[i].trim_end();
             let trimmed = line.trim_start();
             if trimmed.starts_with('|') {
-                let mut table_rows = Vec::new();
-                let mut first = true;
+                let mut cells_rows: Vec<Vec<String>> = Vec::new();
                 while i < lines.len() && lines[i].trim_start().starts_with('|') {
                     let cells: Vec<String> = lines[i]
                         .trim()
                         .trim_matches('|')
                         .split('|')
-                        .map(|c| c.trim().replace("**", ""))
+                        .map(|c| c.trim().to_string())
                         .collect();
                     let is_sep = cells
                         .iter()
                         .all(|c| !c.is_empty() && c.chars().all(|ch| matches!(ch, '-' | ':' | ' ')));
                     if !is_sep {
-                        let refs: Vec<&str> = cells.iter().map(String::as_str).collect();
-                        table_rows.push(row(&refs, first));
-                        first = false;
+                        cells_rows.push(cells);
                     }
                     i += 1;
                 }
-                if !table_rows.is_empty() {
-                    doc = doc.add_table(Table::new(table_rows));
+                if let Some(cols) = cells_rows.iter().map(Vec::len).max().filter(|n| *n > 0) {
+                    let w = BODY_W / cols;
+                    let rows = cells_rows
+                        .iter()
+                        .enumerate()
+                        .map(|(r, cells)| {
+                            TableRow::new(
+                                (0..cols)
+                                    .map(|c| {
+                                        let text = cells.get(c).map(String::as_str).unwrap_or("");
+                                        let runs = inline_runs(text, r == 0, if r == 0 { ACCENT_DARK } else { TEXT }, 19);
+                                        cell(runs, w, (r == 0).then_some(ACCENT_TINT))
+                                    })
+                                    .collect(),
+                            )
+                        })
+                        .collect();
+                    doc = doc.add_table(table(rows, vec![w; cols]));
+                    doc = doc.add_paragraph(Paragraph::new().line_spacing(spacing(0, 60)));
                 }
                 continue;
             }
             if let Some(level) = heading_level(trimmed) {
                 let text = trimmed.trim_start_matches('#').trim();
-                let style = format!("Heading{}", (level + 2).min(4));
-                doc = doc.add_paragraph(inline(Paragraph::new().style(&style), text));
-            } else if let Some(rest) = bullet(trimmed) {
+                let duplicate = first_heading && level == 1 && text.replace("**", "") == title;
+                first_heading = false;
+                if !duplicate {
+                    let style = format!("Heading{}", (level + 1).min(4));
+                    doc = doc.add_paragraph(inline(Paragraph::new().style(&style).keep_next(true), text));
+                }
+            } else if let Some((marker, rest)) = list_item(trimmed) {
                 let depth = (line.len() - trimmed.len()) / 2;
-                let para = Paragraph::new().indent(
-                    Some(360 * (depth as i32 + 1)),
-                    Some(SpecialIndentType::Hanging(240)),
-                    None,
-                    None,
+                let left = 360 * (depth as i32 + 1);
+                let para = Paragraph::new()
+                    .indent(Some(left), Some(SpecialIndentType::Hanging(300)), None, None)
+                    .line_spacing(spacing(0, 60));
+                let color = if marker == "•" { ACCENT } else { TEXT };
+                let para = para.add_run(Run::new().add_text(format!("{marker}\t")).color(color));
+                doc = doc.add_paragraph(inline(para, rest));
+            } else if let Some(q) = trimmed.strip_prefix('>') {
+                let mut para = Paragraph::new()
+                    .indent(Some(240), None, None, None)
+                    .line_spacing(spacing(80, 80));
+                para.property = para.property.set_borders(
+                    ParagraphBorders::with_empty().set(
+                        ParagraphBorder::new(ParagraphBorderPosition::Left).val(BorderType::Single).size(18).space(8).color(ACCENT),
+                    ),
                 );
-                doc = doc.add_paragraph(inline(para, &format!("• {rest}")));
+                doc = doc.add_paragraph(inline_colored(para, q.trim(), MUTED));
             } else if trimmed.is_empty() || trimmed.chars().all(|c| matches!(c, '-' | '*' | '_')) {
                 // 空行與分隔線略過
             } else {
-                doc = doc.add_paragraph(inline(Paragraph::new(), trimmed.trim_start_matches('>').trim()));
+                doc = doc.add_paragraph(inline(Paragraph::new().line_spacing(spacing(0, 100)), trimmed));
             }
             i += 1;
         }
@@ -703,28 +970,48 @@ mod docx {
         (n > 0 && s.chars().nth(n) == Some(' ')).then_some(n)
     }
 
-    fn bullet(s: &str) -> Option<&str> {
-        for p in ["- [ ] ", "- [x] ", "- ", "* ", "+ "] {
+    /// 條列：(符號, 內容)。待辦用方框、編號保留原編號、其他用圓點。
+    fn list_item(s: &str) -> Option<(String, &str)> {
+        for (p, m) in [("- [ ] ", "☐"), ("- [x] ", "☑"), ("- [X] ", "☑"), ("* [ ] ", "☐"), ("* [x] ", "☑")] {
             if let Some(r) = s.strip_prefix(p) {
-                return Some(r);
+                return Some((m.to_string(), r));
             }
         }
-        // 1. 2. 這類編號保留原編號
+        for p in ["- ", "* ", "+ "] {
+            if let Some(r) = s.strip_prefix(p) {
+                return Some(("•".to_string(), r));
+            }
+        }
         let digits = s.chars().take_while(char::is_ascii_digit).count();
-        (digits > 0 && s[digits..].starts_with(". ")).then_some(s)
+        if digits > 0
+            && let Some(r) = s[digits..].strip_prefix(". ")
+        {
+            return Some((format!("{}.", &s[..digits]), r));
+        }
+        None
     }
 
     /// `**粗體**` 切成粗體 run，其他 Markdown 記號拿掉。
-    fn inline(mut para: Paragraph, text: &str) -> Paragraph {
-        for (i, part) in text.split("**").enumerate() {
-            if part.is_empty() {
-                continue;
-            }
-            let clean = part.replace('`', "");
-            let mut run = Run::new().add_text(clean);
-            if i % 2 == 1 {
-                run = run.bold();
-            }
+    fn inline_runs(text: &str, all_bold: bool, color: &str, size: usize) -> Vec<Run> {
+        text.split("**")
+            .enumerate()
+            .filter(|(_, part)| !part.is_empty())
+            .map(|(i, part)| {
+                let mut run = Run::new().add_text(part.replace('`', "")).color(color).size(size);
+                if all_bold || i % 2 == 1 {
+                    run = run.bold();
+                }
+                run
+            })
+            .collect()
+    }
+
+    fn inline(para: Paragraph, text: &str) -> Paragraph {
+        inline_colored(para, text, TEXT)
+    }
+
+    fn inline_colored(mut para: Paragraph, text: &str, color: &str) -> Paragraph {
+        for run in inline_runs(text, false, color, 22) {
             para = para.add_run(run);
         }
         para
@@ -848,6 +1135,40 @@ mod tests {
             let bytes = DocxExporter.render(&p, &ExportOptions { content, ..opts() }).unwrap();
             assert_eq!(&bytes[..2], b"PK");
         }
+    }
+
+    /// 2026-10-31「docx也要修 我希望把排版...等變得更好」：頁碼、待辦方框、編號、逐字稿另起一頁、標題不重複。
+    #[test]
+    fn docx_layout_has_page_numbers_checkboxes_and_transcript_page() {
+        use std::io::Read;
+        let mut p = project();
+        p.title = "重點".into();
+        p.summary.as_mut().unwrap().markdown = "# 重點
+- [ ] 寄企劃書
+- [x] 定好檢討會
+1. 先報價
+> 備註".into();
+        let bytes = DocxExporter.render(&p, &opts()).unwrap();
+        let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+        let mut read = |name: &str| {
+            let mut s = String::new();
+            zip.by_name(name).unwrap().read_to_string(&mut s).unwrap();
+            s
+        };
+        let doc = read("word/document.xml");
+        assert!(doc.contains("☐") && doc.contains("☑"), "待辦用方框");
+        assert!(doc.contains(">1.<") || doc.contains(">1.	<") || doc.contains("1.	"), "編號保留");
+        assert!(doc.contains("pageBreakBefore"), "有摘要時逐字稿另起一頁");
+        assert_eq!(doc.matches(">重點<").count(), 1, "摘要第一行跟標題一樣的略過，內文只有標題區那一次（頁首在 header.xml）");
+        assert!(doc.contains("w:w=\"") && doc.contains("w:type=\"dxa\""), "表格固定寬度");
+        let footer: String = (1..=3)
+            .filter_map(|i| zip.by_name(&format!("word/footer{i}.xml")).ok().map(|mut f| {
+                let mut s = String::new();
+                f.read_to_string(&mut s).unwrap();
+                s
+            }))
+            .collect();
+        assert!(footer.contains("PAGE") && footer.contains("NUMPAGES"), "頁尾有頁碼");
     }
 
     #[test]

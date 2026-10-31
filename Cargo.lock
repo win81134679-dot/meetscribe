@@ -2990,6 +2990,7 @@ dependencies = [
  "uuid",
  "webpki-roots",
  "wiremock",
+ "zip",
 ]
 
 [[package]]

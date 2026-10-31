@@ -44,6 +44,11 @@ object Storage {
     fun exportsDir(ctx: Context): File =
         publicExportsDir(ctx) ?: ctx.getExternalFilesDir("exports") ?: File(ctx.filesDir, "exports")
 
+    /** 刪掉的檔也通知媒體庫，接電腦時才不會看到已經不在的檔。 */
+    fun forget(ctx: Context, paths: List<String>) {
+        if (paths.isNotEmpty()) MediaScannerConnection.scanFile(ctx, paths.toTypedArray(), null, null)
+    }
+
     /** 讓剛寫好的檔馬上出現在接電腦（MTP）與其他 App 的清單裡。 */
     fun scan(ctx: Context, files: List<File>) {
         val paths = files.filter { it.isFile }.map { it.absolutePath }

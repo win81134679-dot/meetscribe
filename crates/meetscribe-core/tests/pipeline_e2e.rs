@@ -557,3 +557,58 @@ async fn retime_fixes_fake_model_times_and_provider_blocks() {
     let d = ffmpeg.probe_duration(&playback).await.unwrap();
     assert!((d - 300.0).abs() < 1.0, "{d}");
 }
+
+/// 2026-10-31「辨識說話者幫我等待時間縮短 若是辨識不出來就趕快接下去辨識不要卡這麼久」：
+/// 說話者模型一直不回應時，一段只等 attribution_timeout、不重試；連續失敗到上限就不再呼叫，剩下的段落直接做完。
+#[tokio::test(flavor = "multi_thread")]
+async fn stuck_speaker_model_does_not_hold_up_the_meeting() {
+    let Ok(ffmpeg) = Ffmpeg::locate("") else { return };
+    let tmp = tempfile::tempdir().unwrap();
+    let paths = AppPaths::at(tmp.path().join("home"));
+    paths.ensure().unwrap();
+    let source = tmp.path().join("卡住的會議.wav");
+    make_audio(&ffmpeg, &source).await;
+
+    let server = mock_openrouter().await;
+    // 說話者模型：60 秒都不回（模擬排隊、配額用完時的 Retry-After）
+    Mock::given(method("POST"))
+        .and(path("/gemini/models/gemini-3.8-flash:generateContent"))
+        .respond_with(ResponseTemplate::new(200).set_delay(std::time::Duration::from_secs(60)))
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    let settings = Settings {
+        api_base: server.uri(),
+        google_api_base: format!("{}/gemini", server.uri()),
+        attribution_provider: LlmProvider::Google,
+        attribution_model: "gemini-3.8-flash".into(),
+        summary_provider: LlmProvider::OpenRouter,
+        summary_model: "nvidia/nemotron-3-ultra-550b-a55b:free".into(),
+        chunk_minutes: 2,
+        max_retries: 4,
+        ..Default::default()
+    };
+    let keys = ApiKeys { openrouter: "sk-test".into(), google: Some("AIza-test".into()) };
+    let mut engine = Engine::from_settings(&paths, settings, keys).await.unwrap();
+    engine.attribution_timeout = std::time::Duration::from_secs(2);
+    engine.attribution_give_up_after = 1;
+    let sink: EventSink = Arc::new(|_| {});
+    let t = std::time::Instant::now();
+    let done = engine.run(Project::new(source, JobOptions::default()), sink, CancellationToken::new()).await;
+    let secs = t.elapsed().as_secs_f64();
+
+    assert_eq!(done.status, ProjectStatus::Done, "{:?}", done.warnings);
+    assert_eq!(done.chunks.len(), 2);
+    assert!(!done.segments.is_empty(), "沒有說話者也照樣有逐字稿");
+    let asked = server
+        .received_requests()
+        .await
+        .unwrap()
+        .iter()
+        .filter(|r| r.url.path().ends_with(":generateContent"))
+        .count();
+    assert_eq!(asked, 1, "第一段等 2 秒就放棄、不重試；第二段已達上限不再呼叫");
+    assert!(done.warnings.iter().any(|w| w.contains("沒有回應")), "{:?}", done.warnings);
+    assert!(done.warnings.iter().any(|w| w.contains("連續")), "{:?}", done.warnings);
+    assert!(secs < 20.0, "整場只花 {secs:.1} 秒（以前一段就可能卡好幾分鐘）");
+}

@@ -255,14 +255,33 @@ impl Bridge {
                 }
                 Ok(s.full_view(&p))
             }
+            // delete_exports：一併刪掉匯出到手機的檔（2026-10-31 使用者：「刪除這場會議 可以詢問是否要刪除已匯出到手機的檔案
+            // 大部分User並不會開啟資料夾手動刪除」）。只刪 export_files 列出的、本程式產生的檔；資料夾空了也刪。
             "delete_project" => {
                 let p = s.load(req)?;
                 if s.is_busy(p.id) {
                     return Err("這場會議正在處理，先取消再刪除".into());
                 }
+                let (mut deleted, mut failed) = (Vec::new(), Vec::new());
+                if req["delete_exports"].as_bool().unwrap_or(false) {
+                    let files = s.export_files(&p);
+                    for f in &files {
+                        match std::fs::remove_file(f) {
+                            Ok(()) => deleted.push(f.clone()),
+                            // 刪不掉的（例如 App 重裝後，舊安裝建的檔不再屬於這個 App）回報給畫面
+                            Err(_) => failed.push(f.clone()),
+                        }
+                    }
+                    // 這場會議自己的資料夾空了就一起刪（共用的匯出資料夾本身不刪）
+                    if let Some(dir) = s.own_folder(&p)
+                        && std::fs::read_dir(&dir).is_ok_and(|mut d| d.next().is_none())
+                    {
+                        let _ = std::fs::remove_dir(&dir);
+                    }
+                }
                 s.store().delete(p.id).map_err(|e| e.to_string())?;
                 s.remove_import(&p);
-                Ok(Value::Null)
+                Ok(json!({ "deleted": deleted, "failed": failed }))
             }
             "export" => {
                 let p = s.load(req)?;
@@ -272,6 +291,16 @@ impl Bridge {
                 };
                 s.fix_export_dir(&mut opts);
                 let files = export::export_project(&p, &opts).map_err(|e| e.to_string())?;
+                // 記在專案上：刪除會議時才知道有哪些檔要一起刪（處理中的專案由背景工作存檔，不在這裡改）
+                if !s.is_busy(p.id) {
+                    let mut p = p;
+                    for f in &files {
+                        if !p.exported.contains(f) {
+                            p.exported.push(f.clone());
+                        }
+                    }
+                    let _ = s.store().save(&p);
+                }
                 Ok(json!(files))
             }
             // 以下是使用者在逐字稿頁的編輯；回傳更新後的專案
@@ -529,6 +558,37 @@ impl Shared {
         }
     }
 
+    /// 這場會議專屬的子資料夾（輸出選項開了「每場會議一個子資料夾」才有；共用的匯出資料夾不算）。
+    fn own_folder(&self, p: &Project) -> Option<PathBuf> {
+        let mut opts = p.options.export.clone().unwrap_or_else(|| self.settings().export);
+        self.fix_export_dir(&mut opts);
+        opts.subfolder.then(|| opts.target_dir(p)).filter(|d| d.is_dir())
+    }
+
+    /// 這場會議匯出到手機、還在的檔：記在專案上的（自動匯出與手動匯出）＋專屬子資料夾裡、檔名以這場會議開頭的匯出格式檔。
+    /// 只列本程式產生的，刪除會議時給使用者勾選一起刪。
+    fn export_files(&self, p: &Project) -> Vec<PathBuf> {
+        let mut out: Vec<PathBuf> = p.exported.iter().filter(|f| f.is_file()).cloned().collect();
+        if let Some(dir) = self.own_folder(p) {
+            let mut opts = p.options.export.clone().unwrap_or_else(|| self.settings().export);
+            self.fix_export_dir(&mut opts);
+            let stem = opts.file_stem(p);
+            let exts: Vec<&str> = export::registry().iter().map(|e| e.extension()).collect();
+            if let Ok(rd) = std::fs::read_dir(&dir) {
+                for e in rd.flatten() {
+                    let f = e.path();
+                    let name = f.file_name().and_then(|n| n.to_str()).unwrap_or_default().to_string();
+                    let ext = f.extension().and_then(|x| x.to_str()).unwrap_or_default().to_ascii_lowercase();
+                    if f.is_file() && name.starts_with(&stem) && exts.contains(&ext.as_str()) && !out.contains(&f) {
+                        out.push(f);
+                    }
+                }
+            }
+        }
+        out.sort();
+        out
+    }
+
     /// 這場會議的匯出資料夾（已存在才給）：依目前輸出選項算出來的位置；還沒有的話，以前匯出過的檔所在處
     /// （1.0 的檔還在舊的私有區，新匯出會放到公開資料夾，以新的為準）。
     fn meeting_folder(&self, p: &Project) -> Option<PathBuf> {
@@ -598,6 +658,7 @@ impl Shared {
             "warnings": p.warnings,
             "exported": p.exported,
             "folder": self.meeting_folder(p),
+            "export_files": self.export_files(p),
             "stages": Stage::ALL.iter().map(|s| json!({ "id": s, "label": s.label() })).collect::<Vec<_>>(),
         });
         if let (Value::Object(a), Value::Object(b)) = (&mut v, extra) {
@@ -908,6 +969,56 @@ mod tests {
         assert_eq!(after["updated_from"], "1.0.0");
         assert_eq!(after["device_id"], id.as_str());
         assert!(ok(&b, json!({ "op": "update_info", "version": "1.1.0" }))["updated_from"].is_null());
+    }
+
+    #[test]
+    fn deleting_a_meeting_can_remove_its_exported_files() {
+        let (dir, b) = bridge();
+        let make = |name: &str| {
+            let src = dir.path().join(format!("data/imports/{name}/{name}.m4a"));
+            std::fs::create_dir_all(src.parent().unwrap()).unwrap();
+            std::fs::write(&src, b"x").unwrap();
+            let p = ok(&b, json!({ "op": "create_project", "source": src, "title": name, "start": false }));
+            let id = p["id"].as_str().unwrap().to_string();
+            let store = ProjectStore::new(dir.path().join("data/projects"));
+            let mut proj = store.load(Uuid::parse_str(&id).unwrap()).unwrap();
+            proj.segments.push(meetscribe_core::model::Segment {
+                id: 1, start: 0.0, end: 2.0, timing: meetscribe_core::model::Timing::Model,
+                speaker: None, text: "大家好".into(), chunk: 0, edited: false,
+            });
+            proj.status = ProjectStatus::Done;
+            store.save(&proj).unwrap();
+            id
+        };
+        let keep = make("留著");
+        let gone = make("週會");
+        for id in [&keep, &gone] {
+            ok(&b, json!({ "op": "export", "id": id }));
+        }
+        let folder = dir.path().join("exports").join("週會");
+        // 使用者自己放進來的檔（不是匯出格式、或檔名不是這場會議）不能被刪
+        std::fs::write(folder.join("我的筆記.jpg"), b"x").unwrap();
+        let view = ok(&b, json!({ "op": "load_project", "id": gone }));
+        let listed = view["export_files"].as_array().unwrap().len();
+        assert!(listed >= 3, "docx、md、srt 都列出來，實際 {listed}");
+
+        let r = ok(&b, json!({ "op": "delete_project", "id": gone, "delete_exports": true }));
+        assert_eq!(r["deleted"].as_array().unwrap().len(), listed);
+        assert!(r["failed"].as_array().unwrap().is_empty());
+        assert!(folder.join("我的筆記.jpg").exists(), "不是我們產生的檔留著");
+        assert!(!folder.join("週會.docx").exists());
+
+        // 不勾：匯出檔留著
+        let r = ok(&b, json!({ "op": "delete_project", "id": keep, "delete_exports": false }));
+        assert!(r["deleted"].as_array().unwrap().is_empty());
+        assert!(dir.path().join("exports/留著/留著.docx").exists());
+
+        // 資料夾清空的話一起刪
+        std::fs::remove_file(folder.join("我的筆記.jpg")).unwrap();
+        let again = make("週會");
+        ok(&b, json!({ "op": "export", "id": again }));
+        ok(&b, json!({ "op": "delete_project", "id": again, "delete_exports": true }));
+        assert!(!folder.exists(), "空的會議資料夾一起刪掉");
     }
 
     #[test]

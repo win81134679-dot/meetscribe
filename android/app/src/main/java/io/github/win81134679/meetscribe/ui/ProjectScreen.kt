@@ -148,19 +148,60 @@ fun ProjectScreen(id: String, onBack: () -> Unit) {
         }
     }
     if (confirmDelete) {
+        val ctx = LocalContext.current
+        val exported = p?.exportFiles.orEmpty()
+        // 預設勾：大部分人不會自己去資料夾刪（2026-10-31 使用者）
+        var alsoFiles by remember { mutableStateOf(true) }
+        val where = exported.firstOrNull()?.let { File(it).parentFile }?.let(Storage::displayPath)
         AlertDialog(
             onDismissRequest = { confirmDelete = false },
             title = { Text("刪除這場會議？") },
-            text = { Text("逐字稿、摘要、轉好的音檔都會刪除，無法復原。已匯出的檔案不受影響。") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text("逐字稿、摘要、轉好的音檔都會刪除，無法復原。")
+                    if (exported.isNotEmpty()) {
+                        Row(
+                            Modifier.fillMaxWidth().clip(RoundedCornerShape(8.dp))
+                                .clickable(role = Role.Checkbox) { alsoFiles = !alsoFiles },
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Checkbox(checked = alsoFiles, onCheckedChange = null)
+                            Spacer(Modifier.width(8.dp))
+                            Column {
+                                Text("同時刪除已匯出到手機的 ${exported.size} 個檔案")
+                                if (where != null) {
+                                    Text(where, color = Pal.current.textMuted, style = MaterialTheme.typography.bodySmall)
+                                }
+                            }
+                        }
+                        if (!alsoFiles) {
+                            Text("匯出的 Word、Markdown、字幕檔會留在手機上。", color = Pal.current.textMuted, style = MaterialTheme.typography.bodySmall)
+                        }
+                    } else {
+                        Text("這場會議沒有匯出到手機的檔案。", color = Pal.current.textMuted, style = MaterialTheme.typography.bodySmall)
+                    }
+                }
+            },
             confirmButton = {
                 TextButton(onClick = {
                     confirmDelete = false
+                    val withFiles = alsoFiles && exported.isNotEmpty()
                     scope.launch {
-                        // 成功的回傳值就是 JSON null，所以不能用 tryCall（它失敗也回 null）來判斷成敗
-                        val ok = runCatching { Repo.call("delete_project", "id" to id) }
+                        // 成功的回傳值是 {deleted, failed}；失敗丟 BridgeError，所以用 runCatching 判斷成敗
+                        val r = runCatching { Repo.call("delete_project", "id" to id, "delete_exports" to withFiles) as? JSONObject }
                             .onFailure { Repo.toasts.emit(true to (it.message ?: "刪除失敗")) }
-                            .isSuccess
-                        if (ok) {
+                        if (r.isSuccess) {
+                            val res = r.getOrNull()
+                            val deleted = res?.optJSONArray("deleted").strings()
+                            val failed = res?.optJSONArray("failed").strings()
+                            Storage.forget(ctx, deleted)
+                            Repo.toasts.emit(
+                                when {
+                                    failed.isNotEmpty() -> true to "會議已刪除；有 ${failed.size} 個匯出檔刪不掉，請到「檔案」App 手動刪除"
+                                    deleted.isNotEmpty() -> false to "已刪除會議與 ${deleted.size} 個匯出檔"
+                                    else -> false to "已刪除會議"
+                                },
+                            )
                             Repo.refreshProjects()
                             onBack()
                         }
