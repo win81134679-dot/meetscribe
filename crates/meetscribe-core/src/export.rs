@@ -84,7 +84,14 @@ pub struct ExportOptions {
     pub header: bool,
     /// 會議資料夾也放一份錄音（`<檔名>.m4a` 等；2026-10-31 使用者）。只有 Android 用：電腦版的錄音本來就在電腦上。
     pub audio: bool,
+    /// 選項的版本：舊會議記住的選項載入時，補勾後來新增、預設要勾的格式（[`ExportOptions::upgrade`]）。
+    /// 舊檔沒有這欄＝0（欄位自己的 default，不吃整個結構的預設值）。
+    #[serde(default)]
+    pub rev: u32,
 }
+
+/// 目前的匯出選項版本。1：PDF（1.2 新增、預設勾）。
+pub const EXPORT_OPTIONS_REV: u32 = 1;
 
 impl Default for ExportOptions {
     fn default() -> Self {
@@ -102,11 +109,25 @@ impl Default for ExportOptions {
             merge_turns: true,
             header: true,
             audio: true,
+            rev: EXPORT_OPTIONS_REV,
         }
     }
 }
 
 impl ExportOptions {
+    /// 舊的選項補勾後來新增、預設要勾的格式；每種只補一次（之後使用者取消就尊重）。有改就回 true。
+    /// 2026-10-31 使用者：「電腦版PDF摘要要預設勾選」——1.2 之前建的會議，匯出頁沿用當時記住的選項，PDF 沒勾。
+    pub fn upgrade(&mut self) -> bool {
+        if self.rev >= EXPORT_OPTIONS_REV {
+            return false;
+        }
+        if self.rev < 1 && !self.formats.iter().any(|f| f == "pdf") {
+            self.formats.push("pdf".into());
+        }
+        self.rev = EXPORT_OPTIONS_REV;
+        true
+    }
+
     /// 檔名（不含副檔名）：樣式代入標題與建立時間，去掉 Windows 不允許的字元。
     pub fn file_stem(&self, p: &Project) -> String {
         let template = match self.filename.trim() {

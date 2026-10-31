@@ -1,6 +1,6 @@
 [package]
 name = "meetscribe-android"
-version = "1.3.0"
+version = "1.3.1"
 edition = "2024"
 license.workspace = true
 description = "MeetScribe Android 版的 JNI 橋：Kotlin 介面 ⇄ meetscribe-core"
@@ -9,7 +9,7 @@ description = "MeetScribe Android 版的 JNI 橋：Kotlin 介面 ⇄ meetscribe-
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-meetscribe-core = { path = "../meetscribe-core", version = "1.3.0", features = ["native-audio"] }
+meetscribe-core = { path = "../meetscribe-core", version = "1.3.1", features = ["native-audio"] }
 jni = "0.21.1"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"

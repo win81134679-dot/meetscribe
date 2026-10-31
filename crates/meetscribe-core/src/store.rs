@@ -32,7 +32,12 @@ impl ProjectStore {
 
     pub fn load(&self, id: Uuid) -> Result<Project> {
         let bytes = std::fs::read(self.dir(id).join("project.json"))?;
-        Ok(serde_json::from_slice(&bytes)?)
+        let mut p: Project = serde_json::from_slice(&bytes)?;
+        // 舊會議記住的匯出選項補勾後來新增的格式（PDF）；下次存檔時一起寫回
+        if let Some(e) = p.options.export.as_mut() {
+            e.upgrade();
+        }
+        Ok(p)
     }
 
     /// 所有專案，新的在前。讀不了的跳過（記在 log）。
@@ -89,5 +94,29 @@ mod tests {
         assert_eq!(listed[0].title, "會議");
         store.delete(p.id).unwrap();
         assert!(store.list().is_empty());
+    }
+
+    /// 1.2 之前建的會議（匯出選項沒有 rev）載入時補勾 PDF；已經是新版本、使用者自己取消了 PDF 的不再補。
+    #[test]
+    fn old_meetings_get_pdf_checked_once() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = ProjectStore::new(tmp.path().to_path_buf());
+        let mut p = Project::new(PathBuf::from("a.m4a"), JobOptions::default());
+        let mut opts = crate::export::ExportOptions { formats: vec!["md".into(), "docx".into()], ..Default::default() };
+        p.options.export = Some(opts.clone());
+        store.save(&p).unwrap();
+        // 模擬舊檔：拿掉 rev 欄位
+        let file = store.dir(p.id).join("project.json");
+        let mut v: serde_json::Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+        v["options"]["export"].as_object_mut().unwrap().remove("rev");
+        std::fs::write(&file, serde_json::to_vec(&v).unwrap()).unwrap();
+        let got = store.load(p.id).unwrap().options.export.unwrap();
+        assert_eq!(got.formats, vec!["md", "docx", "pdf"]);
+        assert_eq!(got.rev, crate::export::EXPORT_OPTIONS_REV);
+
+        opts.formats = vec!["md".into()];
+        p.options.export = Some(opts);
+        store.save(&p).unwrap();
+        assert_eq!(store.load(p.id).unwrap().options.export.unwrap().formats, vec!["md"], "新版本取消 PDF 就尊重");
     }
 }

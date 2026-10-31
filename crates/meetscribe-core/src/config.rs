@@ -205,6 +205,8 @@ impl Settings {
         if s.migrate() {
             let _ = s.save(paths);
         }
+        // 設定的格式由 migrate（SETTINGS_SCHEMA）處理過了；版本直接標成最新，免得新會議帶著舊版本、載入時又被補勾
+        s.export.rev = crate::export::EXPORT_OPTIONS_REV;
         s.sanitized()
     }
 
