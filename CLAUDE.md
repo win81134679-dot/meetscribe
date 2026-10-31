@@ -48,6 +48,7 @@ $src = "$PWD"; robocopy $src "Y:\5. NVIDIA Nemotron 3.5 Transcribe 逐字稿轉�
 發佈：`installer\build-installer.ps1`（測試 → release → Inno Setup）產出 `dist\MeetScribe-Setup-v<版本>.exe`；版本號在根 `Cargo.toml` 與三個 crate（app、cli 對 core 的相依版本也要一起改）。
 安裝程式的 `AppId` 第一次發佈後不能再改。ffmpeg 不打包（完整版每個 exe 2 百多 MB），安裝最後一頁用 winget 補。1.0.0 於 2026-10-31 發佈到 GitHub Release；**1.1.0 同日用 `工具/publish.py` 發佈（給所有裝置）**，線上 update.json 驗簽、兩個安裝檔 SHA-256 已比對。
 1.0.0 沒有更新功能，已裝 1.0.0 的電腦／手機要手動裝一次 1.1.0，之後才會自己更新。
+1.1.1（刪除會議可一併刪匯出檔、說話者辨識不卡、Word 排版）同日發佈給所有裝置，`update_check` 對真的 GitHub 確認 1.1.0 會挑到它。
 建置時記憶體吃緊（可用虛擬記憶體不到 2 GB）連 `-j 1` 都會 OOM，請使用者先關程式，不要改 LTO 或另開 target 目錄硬編。
 快速開啟：專案根目錄的 `開啟 語音轉錄.cmd`（`%~dp0` 相對路徑，不寫死中文路徑）指向 `target\release\meetscribe-app.exe`。
 刻意不由 AI 建 `.lnk`：全域 CLAUDE.md〈防毒〉記過「claude.exe 建指向自編未簽章 exe 的捷徑」被 Bitdefender 判刑；要 `.lnk` 請使用者自己「傳送到桌面」。
@@ -63,7 +64,8 @@ $src = "$PWD"; robocopy $src "Y:\5. NVIDIA Nemotron 3.5 Transcribe 逐字稿轉�
 - 檢查、下載、驗簽章、挑版本、識別碼、狀態檔都在 `meetscribe-core/src/update.rs`，電腦與手機共用；安裝各自做：`meetscribe-app/src/updater.rs`（Inno 靜默）、`android/.../core/Updater.kt`（PackageInstaller）。
 - **簽章金鑰** `keys/update-signing.pem`＋`keys/update-signing-password.txt`（不進版控，靠每週完整備份）；公鑰 `packaging/update.pub` 以 `include_str!` 編進程式。
   **絕不重產**：換金鑰＝已安裝的每一台都收不到更新。`publish.py new-key` 在檔案已存在時會拒絕。
-- 發佈：`build-installer.ps1`＋`android\build-apk.ps1` → `uv run 工具/publish.py publish --notes "…" [--devices …]` → 下載線上 update.json／sig 驗一次。
+- 發佈：`build-installer.ps1`＋`android\build-apk.ps1` → `uv run 工具/publish.py publish --notes "…" [--devices …]` → 下載線上 update.json／sig 驗一次 →
+  `cargo run -p meetscribe-core --example update_check -- <上一版> AAAA-AAAA windows`（及 `android`）確認裝好的程式真的會挑到新版。
   版本號要比上一個 Release 大，否則裝好的程式不認為有新版。
 - 安裝程式契約：`/SELFUPDATE=1` 時 `InitializeSetup` 等 mutex `MeetScribe-Running`（`updater::RUNNING_MUTEX`，程式啟動就建）消失；`/RELAUNCH=1` 時 `[Run]` 把程式開回來。改任一邊要一起改。
 - 只在安裝版自動安裝（exe 旁有 `unins000.exe`）；`target\` 的開發版只檢查。**AI 不在這台執行下載來的安裝檔**（防毒規則）；實際靜默安裝留給使用者的電腦。
