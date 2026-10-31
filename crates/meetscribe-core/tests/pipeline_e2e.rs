@@ -142,7 +142,8 @@ async fn full_pipeline_with_two_chunks() {
         openrouter: "sk-test".into(),
         google: Some("AIza-test".into()),
     };
-    let engine = Engine::from_settings(&paths, settings, keys).await.unwrap();
+    let mut engine = Engine::from_settings(&paths, settings, keys).await.unwrap();
+    engine.stt_part_secs = 0.0; // 這個測試驗整段的行為；小段見 parts_give_each_minute_a_known_start
     // 設定的 Gemini 模型不存在 → 自動挑最好的 Flash
     assert_eq!(engine.settings.attribution_model, "gemini-3.8-flash");
     assert!((engine.estimate_cost(3600.0).unwrap() - 0.11988).abs() < 1e-6);
@@ -239,7 +240,7 @@ async fn stt_requests(server: &MockServer, longer_than: usize) -> usize {
 }
 
 /// 單段（300 秒、chunk_minutes 4 不切）的專案，轉錄請求先回 `timeouts` 次 524 再成功。
-async fn run_with_queue_timeouts(timeouts: Option<u64>) -> (Project, MockServer, Vec<String>) {
+async fn run_with_queue_timeouts(timeouts: Option<u64>, parts: bool) -> (Project, MockServer, Vec<String>) {
     let ffmpeg = Ffmpeg::locate("").unwrap();
     let tmp = tempfile::tempdir().unwrap();
     let paths = AppPaths::at(tmp.path().join("home"));
@@ -271,6 +272,9 @@ async fn run_with_queue_timeouts(timeouts: Option<u64>) -> (Project, MockServer,
         google: Some("AIza-test".into()),
     };
     let mut engine = Engine::from_settings(&paths, settings, keys).await.unwrap();
+    if !parts {
+        engine.stt_part_secs = 0.0; // 驗整段的行為；小段見 parts_give_each_minute_a_known_start
+    }
     engine.queue_retry_wait = std::time::Duration::ZERO;
     let logs: Arc<Mutex<Vec<String>>> = Arc::default();
     let sink: EventSink = {
@@ -293,7 +297,7 @@ async fn queue_timeout_resends_same_chunk() {
     if Ffmpeg::locate("").is_err() {
         return;
     }
-    let (done, server, logs) = run_with_queue_timeouts(Some(2)).await;
+    let (done, server, logs) = run_with_queue_timeouts(Some(2), false).await;
     assert_eq!(done.status, ProjectStatus::Done, "warnings: {:?}", done.warnings);
     // 排隊逾時跟長度無關：不切段，同一段原樣重送
     assert_eq!(done.chunks.len(), 1);
@@ -304,12 +308,29 @@ async fn queue_timeout_resends_same_chunk() {
     assert!((done.usage.stt_usd - 0.004).abs() < 1e-9);
 }
 
+/// 小段讓請求數變多：遇到排隊逾時一樣一輪輪重送到全部做完，逾時的小段不重複計費。
+#[tokio::test(flavor = "multi_thread")]
+async fn queue_timeouts_with_parts_still_finish() {
+    if Ffmpeg::locate("").is_err() {
+        return;
+    }
+    let (done, server, logs) = run_with_queue_timeouts(Some(2), true).await;
+    assert_eq!(done.status, ProjectStatus::Done, "warnings: {:?}", done.warnings);
+    let c = &done.chunks[0];
+    assert!(c.parts.is_empty());
+    assert_eq!(c.stt.as_ref().unwrap().segments.len(), 5, "300 秒切 5 小段");
+    // 5 小段＋2 次逾時重送＋一次 503 的 HTTP 層重試
+    assert_eq!(stt_requests(&server, 0).await, 8);
+    assert!(logs.iter().any(|l| l.contains("排隊逾時（不收費）")), "{logs:?}");
+    assert!((done.usage.stt_usd - 0.004 * 5.0).abs() < 1e-9, "{}", done.usage.stt_usd);
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn endless_queue_timeouts_stop_resumably() {
     if Ffmpeg::locate("").is_err() {
         return;
     }
-    let (p, server, _) = run_with_queue_timeouts(None).await;
+    let (p, server, _) = run_with_queue_timeouts(None, false).await;
     assert!(matches!(&p.status, ProjectStatus::Failed(m) if m.contains("排隊")), "{:?}", p.status);
     assert!(p.status.is_resumable());
     // 第 1 次送出＋6 輪重送（另加一次 503 的 HTTP 層重試）
@@ -356,7 +377,8 @@ async fn failed_chunk_keeps_finished_ones() {
         openrouter: "sk-test".into(),
         google: None,
     };
-    let engine = Engine::from_settings(&paths, settings, keys).await.unwrap();
+    let mut engine = Engine::from_settings(&paths, settings, keys).await.unwrap();
+    engine.stt_part_secs = 0.0; // 這個測試驗整段的行為；小段見 parts_give_each_minute_a_known_start
     let p = engine
         .run(Project::new(source, JobOptions::default()), Arc::new(|_| {}), CancellationToken::new())
         .await;
@@ -386,7 +408,8 @@ async fn cancel_marks_project_resumable() {
         openrouter: "sk-test".into(),
         google: None,
     };
-    let engine = Engine::from_settings(&paths, settings, keys).await.unwrap();
+    let mut engine = Engine::from_settings(&paths, settings, keys).await.unwrap();
+    engine.stt_part_secs = 0.0; // 這個測試驗整段的行為；小段見 parts_give_each_minute_a_known_start
     // 沒有 Google Key → 說話者分配改用 OpenRouter 免費模型
     assert!(engine.settings.attribution_model.ends_with(":free"));
     // 預設摘要也是免費：沒有 Google Key 時退到 OpenRouter 的免費模型
@@ -445,6 +468,19 @@ async fn full_pipeline_with_native_audio_backend() {
     }
 
     let server = mock_openrouter().await;
+    // 小段讓每段有 6、9 句：假 Gemini 每句都標（預設的只標 3 句，涵蓋不到六成會被當失敗）
+    let all: Vec<String> = (0..9).map(|i| format!("[{i},\"N1\",{}]", i * 10)).collect();
+    let body = format!("{{\"speakers\":[{{\"id\":\"N1\",\"name\":\"王經理\",\"note\":\"男聲\"}}],\"a\":[{}]}}", all.join(","));
+    Mock::given(method("POST"))
+        .and(path("/gemini/models/gemini-3.8-flash:generateContent"))
+        .and(body_string_contains("說話者標註員"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "candidates": [{ "content": { "parts": [{ "text": body }] }, "finishReason": "STOP" }],
+            "usageMetadata": { "promptTokenCount": 5000, "candidatesTokenCount": 50 }
+        })))
+        .with_priority(1)
+        .mount(&server)
+        .await;
     let settings = Settings {
         api_base: server.uri(),
         google_api_base: format!("{}/gemini", server.uri()),
@@ -489,7 +525,17 @@ async fn full_pipeline_with_native_audio_backend() {
         let d = NativeAudio.probe_duration(&f).await.unwrap();
         assert!((d - c.duration()).abs() < 0.5, "{}：{d} vs {}", c.file, c.duration());
     }
-    assert_eq!(done.segments.len(), 6);
+    // 送轉錄的小段（約 60 秒）也用內建音訊切：116.5 秒→2 小段、183.5 秒→3 小段，每小段 3 句
+    let per_chunk: Vec<usize> = done.chunks.iter().map(|c| c.stt.as_ref().unwrap().segments.len()).collect();
+    assert_eq!(per_chunk, vec![2, 3]);
+    assert!(done.chunks.iter().all(|c| c.parts.is_empty()));
+    assert_eq!(done.segments.len(), 15);
+    for c in &done.chunks {
+        let want: Vec<f64> = c.stt.as_ref().unwrap().segments.iter().map(|s| c.start + s.start).collect();
+        let got: Vec<f64> = done.segments.iter().filter(|s| s.chunk == c.index && s.text.starts_with("大家好")).map(|s| s.start).collect();
+        assert_eq!(got.len(), want.len());
+        assert!(got.iter().zip(&want).all(|(a, b)| (a - b).abs() < 0.01), "{got:?} vs {want:?}");
+    }
     assert_eq!(done.speakers.len(), 1);
     let clip = done.speakers[0].sample_clip.as_ref().expect("聲音樣本");
     assert!(engine.store.path_in(done.id, clip).metadata().unwrap().len() > 1000);
@@ -517,7 +563,7 @@ async fn retime_fixes_fake_model_times_and_provider_blocks() {
         p.timing_rev = 0;
         p.duration = 300.0;
         p.audio_file = Some("audio.wav".into());
-        p.chunks = vec![ChunkRecord { index: 0, start: 0.0, end: 300.0, file: "c.mp3".into(), stt: None, attributed: true }];
+        p.chunks = vec![ChunkRecord { index: 0, start: 0.0, end: 300.0, file: "c.mp3".into(), stt: None, attributed: true, parts: vec![] }];
         p.segments = segments;
         p
     };
@@ -549,6 +595,26 @@ async fn retime_fixes_fake_model_times_and_provider_blocks() {
     assert!(p.segments.iter().all(|s| !in_silence(s.start)));
     let ids: std::collections::HashSet<u64> = p.segments.iter().map(|s| s.id).collect();
     assert_eq!(ids.len(), p.segments.len(), "句子編號不重複");
+
+    // 2026-10-31 第二輪「跟隨播放還是跟不上」：音樂課第 9 段，第一窗（0–150 秒）只講了幾句、其餘在拉琴，
+    // 第二窗開頭那句被字數估算放到很前面。供應商的窗開頭是確定的時間，要當錨點。
+    let windows = |a: String, b: String| meetscribe_core::model::SttResult {
+        text: format!("{a}{b}"),
+        segments: vec![
+            meetscribe_core::model::TimedSegment { text: a, start: 0.0, end: 150.0, speaker: None },
+            meetscribe_core::model::TimedSegment { text: b, start: 150.0, end: 300.0, speaker: None },
+        ],
+        ..Default::default()
+    };
+    let first: String = (0..3).map(sentence).collect();
+    let second: String = (3..30).map(sentence).collect();
+    let est: Vec<Segment> = (0..30).map(|i| seg(i as u64 + 1, i as f64 * 10.0, i as f64 * 10.0 + 10.0, Timing::Estimated, sentence(i))).collect();
+    let mut p = make(est);
+    p.chunks[0].stt = Some(windows(first, second));
+    assert!(meetscribe_core::pipeline::retime_project(&audio, &dir, &mut p, &cancel).await.unwrap());
+    let b = p.segments.iter().find(|s| s.text == sentence(3)).unwrap();
+    assert!((b.start - 150.0).abs() < 0.01, "第二窗第一句應從 150 秒開始，實際 {:.1}", b.start);
+    assert!(p.segments.iter().filter(|s| s.text != sentence(0)).all(|s| !in_silence(s.start)));
 
     // 高品質播放音訊（AAC）
     assert!(meetscribe_core::pipeline::ensure_playback(&audio, &dir, &mut p, &cancel).await.unwrap());
@@ -590,6 +656,7 @@ async fn stuck_speaker_model_does_not_hold_up_the_meeting() {
     };
     let keys = ApiKeys { openrouter: "sk-test".into(), google: Some("AIza-test".into()) };
     let mut engine = Engine::from_settings(&paths, settings, keys).await.unwrap();
+    engine.stt_part_secs = 0.0; // 這個測試驗整段的行為；小段見 parts_give_each_minute_a_known_start
     engine.attribution_timeout = std::time::Duration::from_secs(2);
     engine.attribution_give_up_after = 1;
     let sink: EventSink = Arc::new(|_| {});
@@ -611,4 +678,64 @@ async fn stuck_speaker_model_does_not_hold_up_the_meeting() {
     assert!(done.warnings.iter().any(|w| w.contains("沒有回應")), "{:?}", done.warnings);
     assert!(done.warnings.iter().any(|w| w.contains("連續")), "{:?}", done.warnings);
     assert!(secs < 20.0, "整場只花 {secs:.1} 秒（以前一段就可能卡好幾分鐘）");
+}
+
+/// 2026-10-31 使用者同意「轉錄改成每 60 秒送一段」：300 秒的一段切成 5 小段送轉錄（切在停頓），
+/// 合併後每小段的第一句從小段開頭開始；中斷後續跑只送沒做完的小段（不重複付費）。
+#[tokio::test(flavor = "multi_thread")]
+async fn parts_give_each_minute_a_known_start() {
+    let Ok(ffmpeg) = Ffmpeg::locate("") else { return };
+    let tmp = tempfile::tempdir().unwrap();
+    let paths = AppPaths::at(tmp.path().join("home"));
+    paths.ensure().unwrap();
+    let source = tmp.path().join("課.wav");
+    make_audio(&ffmpeg, &source).await;
+    let server = mock_openrouter().await;
+    let settings = Settings {
+        api_base: server.uri(),
+        google_api_base: format!("{}/gemini", server.uri()),
+        summary_provider: LlmProvider::OpenRouter,
+        chunk_minutes: 10,
+        stt_concurrency: 1,
+        max_retries: 2,
+        ..Default::default()
+    };
+    let keys = ApiKeys { openrouter: "sk-test".into(), google: Some("AIza-test".into()) };
+    let engine = Engine::from_settings(&paths, settings, keys).await.unwrap();
+    // 做完 2 小段就取消
+    let cancel = CancellationToken::new();
+    let sink: EventSink = {
+        let cancel = cancel.clone();
+        Arc::new(move |e| {
+            if let Event::Updated(p) = e
+                && p.chunks.first().is_some_and(|c| c.parts.iter().filter(|x| x.stt.is_some()).count() >= 2)
+            {
+                cancel.cancel();
+            }
+        })
+    };
+    let first = engine.run(Project::new(source, JobOptions::default()), sink, cancel).await;
+    assert_eq!(first.status, ProjectStatus::Cancelled);
+    assert_eq!(first.chunks.len(), 1, "說話者分配仍是整段");
+    let parts = &first.chunks[0].parts;
+    let bounds: Vec<(f64, f64)> = parts.iter().map(|x| (x.start, x.end)).collect();
+    assert_eq!(parts.len(), 5, "{bounds:?}");
+    assert!((parts[1].end - 116.5).abs() < 0.6 && (parts[3].end - 236.5).abs() < 0.6, "切在停頓 {bounds:?}");
+    assert_eq!(parts.iter().filter(|x| x.stt.is_some()).count(), 2, "做完的小段要存檔");
+    let sent = stt_requests(&server, 0).await;
+
+    let resumed = engine.run(engine.store.load(first.id).unwrap(), Arc::new(|_| {}), CancellationToken::new()).await;
+    assert_eq!(resumed.status, ProjectStatus::Done, "warnings: {:?}", resumed.warnings);
+    assert_eq!(stt_requests(&server, 0).await, sent + 3, "續跑只送沒做完的 3 小段");
+    let c = &resumed.chunks[0];
+    assert!(c.parts.is_empty(), "合併後清掉小段");
+    let dir = engine.store.dir(resumed.id).join("chunks");
+    assert!(!dir.read_dir().unwrap().any(|e| e.unwrap().file_name().to_string_lossy().contains("_p")), "小段音檔刪掉");
+    assert_eq!(c.stt.as_ref().unwrap().segments.len(), 5);
+    let starts: Vec<f64> = resumed.segments.iter().filter(|s| s.text.starts_with("大家好")).map(|s| s.start).collect();
+    assert_eq!(starts.len(), 5);
+    for (s, (a, _)) in starts.iter().zip(&bounds) {
+        assert!((s - a).abs() < 0.01, "每小段第一句從小段開頭開始：{starts:?} vs {bounds:?}");
+    }
+    assert!((resumed.usage.stt_usd - 0.004 * 5.0).abs() < 1e-9, "{}", resumed.usage.stt_usd);
 }

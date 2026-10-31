@@ -10,6 +10,7 @@
   uv run 工具/publish.py publish --only windows          只發電腦版（或 android）
   uv run 工具/publish.py open v1.2.0                     把只推給部分裝置的版本開放給所有裝置
   uv run 工具/publish.py publish --dry-run               只在 target/publish/ 簽好，不上傳
+  uv run 工具/publish.py prune                           dist/ 只留最新版（publish 成功後會自動做）
 
 一個 Release 帶：安裝檔（MeetScribe-Setup-v<版本>.exe）、APK（MeetScribe-Android-v<版本>.apk）、update.json（版本、說明、
 各平台檔名／大小／SHA-256、devices＝null 或識別碼清單）、update.sig（ECDSA P-256／SHA-256 簽 update.json 的原始位元組，DER、base64）。
@@ -133,7 +134,7 @@ def build_manifest(version: str, notes: str, devices, files: dict) -> bytes:
 
 
 def gh(*args: str, check=True) -> subprocess.CompletedProcess:
-    return subprocess.run(["gh", *args], check=check, capture_output=not check, text=True)
+    return subprocess.run(["gh", *args], check=check, capture_output=not check, text=True, encoding="utf-8", errors="replace")
 
 
 def release_body(version: str, notes: str, devices) -> str:
@@ -142,6 +143,34 @@ def release_body(version: str, notes: str, devices) -> str:
              f"推送對象：{who}。已安裝的電腦版與手機版會自己檢查並更新（約一天內），也可在「設定 → 關於與更新」按「檢查更新」。",
              "", "第一次安裝：電腦下載 `MeetScribe-Setup-v*.exe`；Android 下載 `MeetScribe-Android-v*.apk`。"]
     return "\n".join(lines)
+
+
+DIST_FILE = re.compile(r"^MeetScribe-(Setup|Android)-v(\d+)\.(\d+)\.(\d+)(-debug)?\.(exe|apk)$")
+
+
+def prune_dist(dist: Path, repo: str) -> None:
+    """dist/ 只留最新版（2026-10-31 使用者：「dist 資料夾只留最新的版本」）：電腦安裝檔與 APK 各留版本最大的一個
+    （只發一個平台時另一個平台的最新版留著）；debug APK 都刪；舊的正式版要在 GitHub Release 上找得到才刪（刪了可以再下載）。"""
+    found = []
+    for p in dist.glob("MeetScribe-*"):
+        m = DIST_FILE.match(p.name)
+        if m:
+            found.append((m.group(1), tuple(map(int, m.group(2, 3, 4))), bool(m.group(5)), p))
+    newest = {kind: max(v for k, v, debug, _ in found if k == kind and not debug)
+              for kind in {k for k, _, debug, _ in found if not debug}}
+    on_github: dict[tuple, bool] = {}
+    for kind, ver, debug, p in sorted(found, key=lambda x: x[1]):
+        if not debug and ver == newest.get(kind):
+            continue
+        if not debug:
+            if ver not in on_github:
+                tag = "v" + ".".join(map(str, ver))
+                on_github[ver] = gh("release", "view", tag, "--repo", repo, check=False).returncode == 0
+            if not on_github[ver]:
+                print(f"留著 {p.name}：GitHub 上沒有這版的 Release")
+                continue
+        p.unlink()
+        print(f"刪掉 {p.name}")
 
 
 def publish(args) -> None:
@@ -179,6 +208,8 @@ def publish(args) -> None:
         gh("release", "create", tag, "--repo", args.repo, "--title", f"語音轉錄 {version}",
            "--notes", release_body(version, args.notes, devices), *uploads)
     print(f"已發佈 {tag}；裝好的程式一天內會自己更新")
+    if not args.keep_old:
+        prune_dist(dist, args.repo)
 
 
 def open_release(args) -> None:
@@ -215,10 +246,14 @@ def main() -> int:
     p.add_argument("--version", help="預設讀根 Cargo.toml")
     p.add_argument("--dist", default=str(ROOT / "dist"))
     p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--keep-old", action="store_true", help="發佈後不清 dist/ 裡的舊版")
+    r = sub.add_parser("prune")
+    r.add_argument("--dist", default=str(ROOT / "dist"))
     o = sub.add_parser("open")
     o.add_argument("tag")
     args = ap.parse_args()
-    {"new-key": new_key, "publish": publish, "open": open_release}[args.cmd](args)
+    {"new-key": new_key, "publish": publish, "open": open_release,
+     "prune": lambda a: prune_dist(Path(a.dist), a.repo)}[args.cmd](args)
     return 0
 
 

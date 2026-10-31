@@ -29,6 +29,10 @@ fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("語音轉錄")
+            // 工具/make_icons.py 產的，跟 exe（build.rs）、安裝程式、手機同一個圖示
+            .with_icon(
+                eframe::icon_data::from_png_bytes(include_bytes!("../../../packaging/icon-256.png")).unwrap_or_default(),
+            )
             .with_inner_size([1280.0, 820.0])
             .with_min_inner_size([900.0, 600.0])
             .with_drag_and_drop(true),

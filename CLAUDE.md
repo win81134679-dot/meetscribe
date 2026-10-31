@@ -37,6 +37,11 @@ $src = "$PWD"; robocopy $src "Y:\5. NVIDIA Nemotron 3.5 Transcribe 逐字稿轉�
 `playback.*` 是**播放、核對**用的高品質副本（桌面 AAC 128 kbps 保留原取樣率；Android 直接保留原始檔），`Project::playback_audio()` 優先用它。
 改 ffmpeg 那條路的行為（切段、正規化格式）時，兩個後端要一起改，`pipeline_e2e` 的兩個完整流程測試各驗一條。
 
+圖示（2026-10-31 使用者：「為什麼電腦程式沒有圖示 幫我重新設計圖示電腦與手機要一致」；之前電腦版完全沒有圖示）：`工具/make_icons.py` 是唯一來源，
+一份幾何（108 單位的 Android 自適應畫布，電腦版圓角方塊取看得到的 18～90）產出 `packaging/icon.ico`（`crates/meetscribe-app/build.rs` 用 `winresource` 嵌進 exe，
+要 Windows SDK 的 rc.exe；Inno `SetupIconFile` 也用它）、`icon-256.png`（視窗圖示，`main.rs` 的 `with_icon`）、Android 的 `ic_launcher_foreground.xml`／`ic_notification.xml`。
+改圖示只改那支、重跑，別手改產物。24 像素以下用簡化的 `SMALL` 形狀。
+
 外觀（2026-10-30 使用者：「UI 好醜，參考 Filee」）：`theme.rs` 照抄 Filee 上游 `Styles/Soft.axaml`／`SoftPalette.cs` 的 Soft 主題色票與尺寸
 （暖灰頁 `#F6F5F1`、白卡片 16px 圓角、主色 `#7F77DD`、深色 `#1B1B19`），跟隨 Windows 深淺色。顏色一律從 `theme::pal(ui)` 取，
 按鈕、卡片、導覽、分頁用 `theme::` 的元件，不要在畫面裡寫死色值。圖示是 Segoe Fluent Icons 字碼（`theme::icon`），新增前確認字型裡有。
@@ -56,6 +61,8 @@ $src = "$PWD"; robocopy $src "Y:\5. NVIDIA Nemotron 3.5 Transcribe 逐字稿轉�
 1.3.2（手動同步會議內容：摘要頁「同步到其他裝置」、收件端自動套用＋還原上一版，見〈傳到其他裝置〉）同日發佈給所有裝置，`update_check` 兩個平台從 1.3.1 都挑到它。
 1.3.3（摘要改 OpenRouter 下拉選單、預設免費、標免費／付費與費率、可開官網，見〈使用者定的費用分工〉）同日發佈給所有裝置，`update_check` 兩個平台從 1.3.2 都挑到它。
 1.3.4（逐字稿點一下從那句播放：電腦雙擊修改、手機長按修改）同日發佈給所有裝置，`update_check` 兩個平台從 1.3.3 都挑到它。
+1.3.5（跟隨播放：供應商段落開頭當錨點、舊會議重新對齊；轉錄每 60 秒一小段；新圖示）同日發佈給所有裝置：線上 update.json 驗簽、兩個雜湊與建置輸出相同，`update_check` 兩個平台從 1.3.4 都挑到它。`publish.py` 發佈成功後清 `dist/`，只留各平台最新一版
+（2026-10-31 使用者：「dist 資料夾只留最新的版本」；舊的正式版要在 GitHub Release 找得到才刪，`--keep-old` 不清，`prune` 單獨跑）。
 egui 離屏測試要驗雙擊時，直接往 `harness.input_mut().events` 送兩次 PointerButton 按下／放開；kittest 的 `click()` 走無障礙動作，永遠不會被判定成雙擊。
 建 APK 時模擬器要先關（`adb emu kill`）：兩個一起開 Gradle daemon 會被系統砍掉（記憶體不夠）。
 建置時記憶體吃緊（可用虛擬記憶體不到 2 GB）連 `-j 1` 都會 OOM，請使用者先關程式，不要改 LTO 或另開 target 目錄硬編。
@@ -111,6 +118,15 @@ PDF 是 `export/pdf.rs` 照 docx 模組的版面直接畫（krilla，手機沒�
   沒有逐字時間的窗整窗回一段、最後一個不滿 300 秒的窗逐字時間被拉長到超出音訊結尾；說話者模型回的秒數常是假的等差數列（0,1,2… 或每句 +0.2）。
   所以所有時間都先過 `timing::plausible_anchors`／`provider_times_ok`，不可信就丟、改用 `timing::fill`（字數分配到「有聲音的時間」，靜音偵測 -35 dB／0.35 秒）。
   舊專案由 `pipeline::retime_project`（`Project.timing_rev`）在啟動時重新對齊一次。量測工具：`cargo run -p meetscribe-core --example retime -- <專案資料夾的複本>`。
+  第二輪（同日，使用者：「逐字稿的跟隨撥放還是跟聲音有跟不上的狀況」，那場其實是音樂課）：**每窗的開頭是確定的時間**，`timing::provider_anchors` 把供應商段落的開頭對到句子當錨點
+  （說話者辨識路徑原本把它丟了，第 9 段整段晚 28 秒→修後 3.6 秒；TIMING_REV 3）。窗裡面的段落開頭跟強制對齊比差幾秒，但比字數估算準（只用窗開頭反而 11.4→17.6 秒），
+  所以也用；被拉長的最後一窗（段落結束超出音訊）只用它的開頭。模型的錨點由 `timing::merge_anchors` 補在中間、不准跟供應商的衝突。
+  **送轉錄的小段（1.3.5，使用者同意：「可以 做完發佈」）**：說話者分配仍是 `chunk_minutes`（10 分鐘）一段，但每段再切成約 60 秒的 `PartRecord`
+  （`STT_PART_SECS`，切在停頓、`STT_PART_WINDOW` 15 秒內找）送轉錄，每小段做完就存檔、全部回來才 `SttResult::join_parts` 合併並刪小段音檔。
+  每小段一定留一個帶起訖的段落，`provider_anchors` 把每小段開頭當錨點。真實音樂課第 2 段重新轉錄：中位 23.8→3.1 秒、p90 52.4→11.4 秒；費用 US$0.0193，跟整段送一樣（照秒數計費）。
+  不能把 `chunk_minutes` 直接調成 1 分鐘：Gemini 免費額度撐不住十倍的說話者分配請求，跨段配對說話者也會變差。舊會議要重新轉錄才有小段（沒有自動做，會花錢）。
+  端對端測試大多設 `engine.stt_part_secs = 0.0` 驗整段行為；小段由 `parts_give_each_minute_a_known_start`、`queue_timeouts_with_parts_still_finish`、原生音訊那個完整流程測試驗。
+  量誤差：`工具/時間誤差/對齊標準答案.py`（本機 Qwen3-ForcedAligner 對齊自己的逐字稿當答案）→ `工具/時間誤差/量誤差.py`。供應商給的逐字時間不能當答案。
   播放器本身是準的（`player::tests` 用嗶聲量過：MP3 誤差 0、AAC 固定晚 64 ms 是編碼器 priming）。
 - OpenRouter 上 Nemotron 唯一供應商 DeepInfra：`supports_diarization: false`、不吃 prompt。所以說話者靠 Gemini 聽音訊分配；`stt_capabilities()` 查到支援時會自動改走原生 diarize。查法：`GET /api/v1/models/<id>/endpoints`。
 - Gemini 模型名稱常改版：`gemini::pick_audio_model` 在設定的名字不存在時挑最新的穩定版 Flash，別把模型名寫死在別處。

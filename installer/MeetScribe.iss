@@ -36,6 +36,8 @@ VersionInfoDescription={#AppName} 安裝程式
 ; 只裝給目前帳號：%LOCALAPPDATA%\Programs\MeetScribe，不需要系統管理員
 DefaultDirName={autopf}\{#DirName}
 PrivilegesRequired=lowest
+; 圖示由 工具/make_icons.py 產生（exe 本身由 build.rs 嵌入同一個）
+SetupIconFile=..\packaging\icon.ico
 DisableDirPage=yes
 DisableProgramGroupPage=yes
 ArchitecturesAllowed=x64compatible

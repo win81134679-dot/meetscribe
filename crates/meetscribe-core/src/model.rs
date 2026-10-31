@@ -144,6 +144,73 @@ pub struct ChunkRecord {
     /// 這段的說話者分配已完成。
     #[serde(default)]
     pub attributed: bool,
+    /// 送轉錄的小段（約 60 秒一段，見 [`PartRecord`]）。全部轉錄完就合併進 `stt` 並清空。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub parts: Vec<PartRecord>,
+}
+
+/// 送轉錄的小段：一段（說話者分配用，約 10 分鐘）再切成約 60 秒送轉錄，每小段的開頭是確定的時間。
+/// 2026-10-31 使用者同意（「可以 做完發佈」）：供應商 300 秒一窗、窗裡只能依字數估，音樂課那種講一段拉一段琴的錄音差 10～40 秒。
+/// 時間相對於所屬段落開頭；每小段做完就存檔，中斷後不會重送（不重複付費）。
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct PartRecord {
+    pub start: f64,
+    pub end: f64,
+    /// 相對於專案資料夾。
+    pub file: String,
+    pub stt: Option<SttResult>,
+}
+
+impl SttResult {
+    /// 把各小段的結果接成整段的（時間加上小段的開頭）。每小段一定留下一個帶起訖的段落：
+    /// 供應商的段落可信（都在小段內、涵蓋小段的字）就用它的，否則整個小段當一段。
+    /// 逐字時間只有每小段都有、都在小段內才留（否則對不上整段文字）。
+    pub fn join_parts(parts: &[(f64, f64, &SttResult)]) -> SttResult {
+        let mut out = SttResult::default();
+        let chars = |s: &str| crate::textutil::normalize_for_compare(s).chars().count();
+        let mut words_ok = true;
+        for &(start, end, r) in parts {
+            let dur = end - start;
+            let text = r.text.trim();
+            let fits = |s: f64, e: f64| s.is_finite() && e.is_finite() && s >= -0.5 && e >= s && e <= dur + 1.0;
+            if !text.is_empty() {
+                if needs_space(&out.text, text) {
+                    out.text.push(' ');
+                }
+                out.text.push_str(text);
+            }
+            let seg_chars: usize = r.segments.iter().map(|s| chars(&s.text)).sum();
+            let segs_ok = !r.segments.is_empty()
+                && r.segments.iter().all(|s| fits(s.start, s.end))
+                && (seg_chars as f64) >= chars(text) as f64 * 0.9;
+            if segs_ok {
+                out.segments.extend(r.segments.iter().map(|s| TimedSegment {
+                    start: start + s.start.max(0.0),
+                    end: start + s.end,
+                    ..s.clone()
+                }));
+            } else if !text.is_empty() {
+                out.segments.push(TimedSegment { text: text.to_string(), start, end, speaker: None });
+            }
+            if !text.is_empty() && (r.words.is_empty() || !r.words.iter().all(|w| fits(w.start, w.end))) {
+                words_ok = false;
+            }
+            out.words.extend(r.words.iter().map(|w| TimedWord {
+                start: start + w.start.max(0.0),
+                end: start + w.end,
+                ..w.clone()
+            }));
+            out.cost += r.cost;
+            out.seconds += r.seconds;
+            if out.language.is_none() {
+                out.language.clone_from(&r.language);
+            }
+        }
+        if !words_ok {
+            out.words.clear();
+        }
+        out
+    }
 }
 
 impl ChunkRecord {
@@ -457,6 +524,47 @@ pub fn needs_space(a: &str, b: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn stt(text: &str, segments: Vec<(&str, f64, f64)>, words: Vec<(&str, f64, f64)>) -> SttResult {
+        SttResult {
+            text: text.into(),
+            segments: segments.into_iter().map(|(t, s, e)| TimedSegment { text: t.into(), start: s, end: e, speaker: None }).collect(),
+            words: words.into_iter().map(|(t, s, e)| TimedWord { text: t.into(), start: s, end: e, speaker: None }).collect(),
+            cost: 0.002,
+            seconds: 60.0,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn parts_join_with_their_start_times() {
+        // 第一小段沒有時間、第二小段的段落可信、第三小段被拉長（超出 60 秒）
+        let a = stt("大家好。今天開會。", vec![], vec![]);
+        let b = stt("第二段。還有。", vec![("第二段。", 1.0, 3.0), ("還有。", 20.0, 22.0)], vec![]);
+        let c = stt("最後。", vec![("最後。", 50.0, 140.0)], vec![]);
+        let j = SttResult::join_parts(&[(0.0, 60.0, &a), (60.0, 120.0, &b), (120.0, 170.0, &c)]);
+        assert_eq!(j.text, "大家好。今天開會。第二段。還有。最後。");
+        let segs: Vec<(&str, f64, f64)> = j.segments.iter().map(|s| (s.text.as_str(), s.start, s.end)).collect();
+        assert_eq!(segs, vec![("大家好。今天開會。", 0.0, 60.0), ("第二段。", 61.0, 63.0), ("還有。", 80.0, 82.0), ("最後。", 120.0, 170.0)]);
+        assert!((j.cost - 0.006).abs() < 1e-9 && (j.seconds - 180.0).abs() < 1e-9);
+        assert!(j.words.is_empty());
+        // 供應商段落只涵蓋一部分字（真實第 7 段那種）：整個小段當一段
+        let d = stt("甲乙丙丁戊己庚辛壬癸。", vec![("甲乙", 2.0, 3.0)], vec![]);
+        let j = SttResult::join_parts(&[(0.0, 60.0, &d)]);
+        assert_eq!(j.segments.len(), 1);
+        assert_eq!((j.segments[0].start, j.segments[0].end), (0.0, 60.0));
+        // 逐字時間：每小段都有且都在小段內才留，加上小段開頭
+        let e = stt("你好", vec![], vec![("你", 0.5, 0.7), ("好", 0.8, 1.0)]);
+        let f = stt("再見", vec![], vec![("再", 2.0, 2.2), ("見", 2.3, 2.5)]);
+        let j = SttResult::join_parts(&[(0.0, 60.0, &e), (60.0, 120.0, &f)]);
+        assert_eq!(j.words.iter().map(|w| w.start).collect::<Vec<_>>(), vec![0.5, 0.8, 62.0, 62.3]);
+        let g = stt("再見", vec![], vec![]);
+        assert!(SttResult::join_parts(&[(0.0, 60.0, &e), (60.0, 120.0, &g)]).words.is_empty());
+        // 英文小段之間補空白
+        let h = stt("Hello there.", vec![], vec![]);
+        let i = stt("Next part", vec![], vec![]);
+        assert_eq!(SttResult::join_parts(&[(0.0, 60.0, &h), (60.0, 120.0, &i)]).text, "Hello there. Next part");
+    }
 
     fn seg(id: u64, start: f64, end: f64, sp: &str, text: &str) -> Segment {
         Segment {

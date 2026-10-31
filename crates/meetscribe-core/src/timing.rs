@@ -9,14 +9,21 @@
 //! 所以時間一律先過 [`plausible_anchors`]／[`provider_times_ok`]，不可信就丟掉；沒有可信時間的地方用 [`Speech`]
 //! 把字數分配到「有聲音的時間」上（靜音偵測），比平均分給整段準得多。
 
-use crate::textutil::weight;
+use crate::textutil::{normalize_for_compare, weight};
 
 /// 說話速度上限（每秒幾個字母數字；中文約 4～6、英文字母約 12～18）。超過就是時間被擠扁了。
 const MAX_CHARS_PER_SEC: f64 = 25.0;
 /// 比這長的一句當成供應商沒切開的整窗，要重切。
 pub const MAX_SEGMENT_SECS: f64 = 45.0;
-/// 時間對齊規則的版本。2：本檔的規則（2026-10-31）。之前處理的專案會被重新對齊一次。
-pub const TIMING_REV: u32 = 2;
+/// 供應商約 300 秒一窗（真實會議量到 281～314 秒）：離上一窗開頭至少這麼久的段落才算新的一窗
+/// （窗裡面的逐字段落、拉長的最後一窗裡的時間都不算）。
+const MIN_WINDOW_GAP: f64 = 270.0;
+/// 窗開頭的字找到之後，離最近的句子開頭不超過幾個字才採用（約 1 秒）。
+const WINDOW_SNAP_CHARS: usize = 5;
+/// 窗開頭的字在句子文字裡往前後找多遠（使用者改過字、句子文字與窗文字差一點時）。
+const WINDOW_SEARCH_CHARS: usize = 40;
+/// 時間對齊規則的版本。2：本檔的規則（2026-10-31）。3：供應商每窗的開頭當錨點（同日第二輪）。之前處理的專案會被重新對齊一次。
+pub const TIMING_REV: u32 = 3;
 /// 找「有聲音」用的靜音門檻：比切段用的（-30 dB、0.6 秒）敏感，句子之間的短停頓也算。
 pub const SPEECH_NOISE_DB: i32 = -35;
 pub const SPEECH_MIN_SILENCE: f64 = 0.35;
@@ -198,6 +205,97 @@ pub fn provider_times_ok(texts: &[&str], times: &[(f64, f64)], duration: f64) ->
     true
 }
 
+/// 供應商段落的開頭對到的那一句，當錨點。`units` 是同一份文字切成的句子；`provider` 是供應商的段落（文字、起、訖，相對段落開頭）。
+///
+/// 2026-10-31 第二輪（「跟隨播放還是跟不上」，一場音樂課）：窗裡沒有逐字時間時只能依字數估，講一段、拉一段琴的錄音
+/// 會差到 30～60 秒；每窗的開頭是確定的時間，一律採用。窗裡面的段落開頭跟強制對齊比會差幾秒，但還是比字數估算準
+/// （第 13 段：全用 11.4 秒、只用窗開頭 17.6 秒），所以也用——除了被拉長的最後一窗（段落結束超出音訊），那一窗只用開頭。
+/// 哪些段落是「一窗的開頭」：第一段、整窗一段（超過 [`MAX_SEGMENT_SECS`]）的下一段、離上一窗開頭至少 [`MIN_WINDOW_GAP`] 的第一段。
+pub fn provider_anchors(units: &[&str], provider: &[(&str, f64, f64)], duration: f64) -> Vec<Option<f64>> {
+    let mut out = vec![None; units.len()];
+    let norm = |s: &str| -> Vec<char> { normalize_for_compare(s).chars().collect() };
+    let mut unit_at = Vec::with_capacity(units.len());
+    let mut all: Vec<char> = Vec::new();
+    for u in units {
+        unit_at.push(all.len());
+        all.extend(norm(u));
+    }
+    // 每段屬於哪一窗、是不是窗的開頭；每窗的段落最晚結束在哪
+    let (mut last_window, mut after_block) = (f64::NEG_INFINITY, true);
+    let mut window_of = Vec::with_capacity(provider.len());
+    let mut starts_window = Vec::with_capacity(provider.len());
+    let mut window_end: Vec<f64> = Vec::new();
+    for &(_, s, e) in provider {
+        // 超出段落結尾的不可能是新的一窗（是被拉長那一窗的後半）
+        let is_window = s.is_finite() && s <= duration + 1.0 && (after_block || s - last_window >= MIN_WINDOW_GAP);
+        after_block = e - s > MAX_SEGMENT_SECS;
+        if is_window || window_end.is_empty() {
+            if s.is_finite() {
+                last_window = s;
+            }
+            window_end.push(f64::NEG_INFINITY);
+        }
+        let w = window_end.len() - 1;
+        if e.is_finite() {
+            window_end[w] = window_end[w].max(e);
+        }
+        window_of.push(w);
+        starts_window.push(is_window);
+    }
+    let mut expected = 0usize;
+    for (i, &(text, s, _)) in provider.iter().enumerate() {
+        let t = norm(text);
+        let stretched = window_end[window_of[i]] > duration + 1.0;
+        if (starts_window[i] || !stretched) && s.is_finite() && s >= 0.0 {
+            // 這窗的頭幾個字在句子文字裡的位置（使用者改過字會偏一點，在附近找）
+            let key = &t[..t.len().min(6)];
+            let found = (key.len() >= 2)
+                .then(|| {
+                    (expected.saturating_sub(WINDOW_SEARCH_CHARS)..=expected + WINDOW_SEARCH_CHARS)
+                        .filter(|&p| all.get(p..p + key.len()) == Some(key))
+                        .min_by_key(|&p| p.abs_diff(expected))
+                })
+                .flatten();
+            if let Some(pos) = found
+                && let Some(k) = (0..units.len()).min_by_key(|&k| unit_at[k].abs_diff(pos))
+                && unit_at[k].abs_diff(pos) <= WINDOW_SNAP_CHARS
+                && out[k].is_none()
+            {
+                out[k] = Some(s);
+            }
+        }
+        expected += t.len();
+    }
+    out
+}
+
+/// 窗邊界錨點優先；模型的錨點只補在窗邊界之間、不跟它們衝突（時間倒退或語速不可能）的地方。
+pub fn merge_anchors(weights: &[usize], windows: &[Option<f64>], model: &[Option<f64>]) -> Vec<Option<f64>> {
+    let prefix: Vec<usize> = std::iter::once(0)
+        .chain(weights.iter().scan(0usize, |acc, w| {
+            *acc += w;
+            Some(*acc)
+        }))
+        .collect();
+    let chars = |a: usize, b: usize| (prefix[b.min(weights.len())] - prefix[a.min(weights.len())]) as f64;
+    let mut out = windows.to_vec();
+    out.resize(weights.len(), None);
+    for (i, m) in model.iter().enumerate().take(out.len()) {
+        let Some(t) = *m else { continue };
+        if out[i].is_some() {
+            continue;
+        }
+        let prev = out[..i].iter().enumerate().rev().find_map(|(j, a)| a.map(|v| (j, v)));
+        let next = out[i + 1..].iter().enumerate().find_map(|(j, a)| a.map(|v| (i + 1 + j, v)));
+        let ok_prev = prev.is_none_or(|(j, tp)| t >= tp && chars(j, i) <= MAX_CHARS_PER_SEC * (t - tp).max(0.5));
+        let ok_next = next.is_none_or(|(j, tn)| tn >= t && chars(i, j) <= MAX_CHARS_PER_SEC * (tn - t).max(0.5));
+        if ok_prev && ok_next {
+            out[i] = Some(t);
+        }
+    }
+    out
+}
+
 /// 有錨點用錨點，錨點之間與沒有錨點的地方依 [`spread`]。回傳每句 (開始, 結束)，相對於段落開頭。
 pub fn fill(weights: &[usize], anchors: &[Option<f64>], duration: f64, speech: &Speech) -> Vec<(f64, f64)> {
     let n = weights.len();
@@ -325,6 +423,48 @@ mod tests {
         assert!((t[2].0 - 60.0).abs() < 1e-6 && (t[3].0 - 80.0).abs() < 1e-6);
         assert!(t.windows(2).all(|p| (p[0].1 - p[1].0).abs() < 1e-9), "首尾相接");
         assert!((t[3].1 - 100.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn window_starts_become_anchors() {
+        // 真實會議第 9 段：兩窗（0–298、298–568），第二窗開頭那句被字數估算放到 363 秒
+        let units = ["甲甲甲。", "乙乙。", "丙丙丙丙。", "丁丁。"];
+        let windows = [("甲甲甲。乙乙。", 0.0, 298.0), ("丙丙丙丙。丁丁。", 298.0, 568.0)];
+        assert_eq!(provider_anchors(&units, &windows, 568.0), vec![Some(0.0), None, Some(298.0), None]);
+        // 窗邊界落在句子中間、離下一句開頭 2 個字：下一句從窗開頭算（差不到 1 秒）
+        let units = ["甲甲甲乙乙。", "丙丙丙丙。"];
+        let windows = [("甲甲甲", 0.0, 298.0), ("乙乙。丙丙丙丙。", 298.0, 400.0)];
+        assert_eq!(provider_anchors(&units, &windows, 400.0), vec![Some(0.0), Some(298.0)]);
+        // 離最近的句子開頭太遠就不給
+        let units = ["甲甲甲乙乙乙乙乙乙乙乙乙乙。", "丙丙丙丙。"];
+        let windows = [("甲甲甲", 0.0, 298.0), ("乙乙乙乙乙乙乙乙乙乙。丙丙丙丙。", 298.0, 400.0)];
+        assert_eq!(provider_anchors(&units, &windows, 400.0), vec![Some(0.0), None]);
+        // 文字對不上（使用者大改過）就不給
+        let units = ["完全不同的句子一。", "完全不同的句子二。"];
+        assert!(provider_anchors(&units, &[("甲甲甲甲甲甲甲甲甲甲", 0.0, 298.0), ("乙", 298.0, 300.0)], 300.0)[1].is_none());
+    }
+
+    #[test]
+    fn stretched_last_window_only_gives_its_start() {
+        // 第 17 段（370 秒）：第二窗從 290 秒開始，但逐字時間被拉長到 578 秒；裡面的 300、325… 都不可信
+        let units = ["甲甲甲甲。", "乙乙。", "丙丙。", "丁丁。"];
+        let windows = [("甲甲甲甲。", 0.0, 289.0), ("乙乙。", 290.0, 297.0), ("丙丙。", 300.0, 303.0), ("丁丁。", 569.0, 578.0)];
+        assert_eq!(provider_anchors(&units, &windows, 370.0), vec![Some(0.0), Some(290.0), None, None]);
+        // 第 13 段（674 秒）：第一窗沒被拉長，裡面的逐字段落（15、242 秒）也用；242 秒不是新的一窗，第二窗 294 秒開始
+        let windows = [("甲甲甲甲。", 0.0, 7.0), ("乙乙。", 15.0, 17.0), ("丙丙。", 242.0, 247.0), ("丁丁。", 294.0, 577.0)];
+        assert_eq!(provider_anchors(&units, &windows, 674.0), vec![Some(0.0), Some(15.0), Some(242.0), Some(294.0)]);
+        // 同樣的段落但 300 秒就結束：第二窗超出結尾＝被拉長，第一窗照用
+        let windows = [("甲甲甲甲。", 0.0, 7.0), ("乙乙。", 15.0, 17.0), ("丙丙。", 294.0, 296.0), ("丁丁。", 310.0, 577.0)];
+        assert_eq!(provider_anchors(&units, &windows, 330.0), vec![Some(0.0), Some(15.0), Some(294.0), None]);
+    }
+
+    #[test]
+    fn model_anchors_fill_in_between_window_starts() {
+        let weights = [10, 10, 10, 10, 10];
+        let windows = [Some(0.0), None, Some(100.0), None, None];
+        let model = [None, Some(50.0), Some(30.0), Some(90.0), Some(140.0)];
+        // 第 2 句以窗邊界為準；第 3 句的 90 秒早於第 2 句的 100 秒，不要
+        assert_eq!(merge_anchors(&weights, &windows, &model), vec![Some(0.0), Some(50.0), Some(100.0), None, Some(140.0)]);
     }
 
     #[test]

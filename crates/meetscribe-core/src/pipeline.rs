@@ -8,7 +8,7 @@ use crate::claude_code::ClaudeCodeCli;
 use crate::config::{AppPaths, LlmProvider, Settings};
 use crate::export;
 use crate::gemini::{self, Gemini};
-use crate::model::{ChunkRecord, Project, ProjectStatus, Segment, Stage, SttResult, Timing};
+use crate::model::{ChunkRecord, PartRecord, Project, ProjectStatus, Segment, Stage, SttResult, Timing};
 use crate::openrouter::{OpenRouter, SttCapabilities};
 use crate::prompts::Prompts;
 use crate::providers::{LlmClient, TranscribeRequest, Transcriber};
@@ -29,6 +29,12 @@ use uuid::Uuid;
 const UNIT_MAX_CHARS: usize = 80;
 /// 靜音切點的搜尋範圍（秒）。
 const CUT_WINDOW_SECS: f64 = 90.0;
+/// 送轉錄的小段長度（秒）：每小段的開頭是確定的時間，跟隨播放才準（見 [`crate::model::PartRecord`]）。
+/// 真實會議（音樂課）用強制對齊量過：300 秒一窗中位差 10～40 秒，模擬每 60 秒一個確定時間點降到 1～4 秒。
+/// 費用照音訊秒數算（實測每秒 0.0000333 美元、跟長度無關），切短不會變貴。
+const STT_PART_SECS: f64 = 60.0;
+/// 小段切點在理想位置前後幾秒內找停頓。
+const STT_PART_WINDOW: f64 = 15.0;
 /// 轉錄服務排隊逾時時最多重送幾輪（逾時不收費）。
 const MAX_QUEUE_RETRY_ROUNDS: u32 = 6;
 /// 每輪重送前的等待（第 n 輪等 n 倍）。
@@ -90,6 +96,8 @@ pub struct Engine {
     pub attribution_timeout: std::time::Duration,
     /// 連續幾段失敗就不再呼叫模型，見 [`ATTRIBUTION_GIVE_UP_AFTER`]。
     pub attribution_give_up_after: u32,
+    /// 送轉錄的小段長度，見 [`STT_PART_SECS`]；0＝整段送（測試用）。
+    pub stt_part_secs: f64,
 }
 
 /// 傳進各步驟的共用參數。
@@ -212,6 +220,7 @@ impl Engine {
             queue_retry_wait: QUEUE_RETRY_WAIT,
             attribution_timeout: ATTRIBUTION_TIMEOUT,
             attribution_give_up_after: ATTRIBUTION_GIVE_UP_AFTER,
+            stt_part_secs: STT_PART_SECS,
             settings,
         })
     }
@@ -385,6 +394,7 @@ impl Engine {
                     file,
                     stt: None,
                     attributed: false,
+                    parts: Vec::new(),
                 });
             }
             ctx.log(
@@ -407,6 +417,7 @@ impl Engine {
     /// 所以原樣重送：出現過一次就改成一次只送一段（自己的請求不互相卡位），每輪之間等久一點讓佇列消化。
     /// 其他錯誤不中斷別段，等這一輪都回來、做完的存檔之後才回報。
     async fn transcribe(&self, p: &mut Project, ctx: &Ctx<'_>) -> Result<()> {
+        self.plan_parts(p, ctx).await?;
         let mut concurrency = self.settings.stt_concurrency.max(1);
         let mut round = 0u32;
         loop {
@@ -461,19 +472,79 @@ impl Engine {
         Ok(())
     }
 
-    /// 一輪轉錄，做完的段落逐段存檔。回傳排隊逾時、要重送的段落與第一個其他錯誤。
+    /// 還沒轉錄的段落切成約 [`Engine::stt_part_secs`] 秒的小段（切在停頓），見 [`PartRecord`]。
+    /// 已經切過、已經轉錄完、或本來就短的段落不動。
+    async fn plan_parts(&self, p: &mut Project, ctx: &Ctx<'_>) -> Result<()> {
+        let part = self.stt_part_secs;
+        let dir = self.store.dir(p.id);
+        for i in 0..p.chunks.len() {
+            Self::finish_parts(&dir, &mut p.chunks[i]);
+            let c = &p.chunks[i];
+            if part <= 0.0 || c.stt.is_some() || !c.parts.is_empty() || c.duration() <= part + STT_PART_WINDOW {
+                continue;
+            }
+            ctx.check()?;
+            let msg = format!("第 {}/{} 段切成約 {part:.0} 秒的小段", i + 1, p.chunks.len());
+            ctx.progress(p, Stage::Transcribe, 0.0, msg);
+            let (file, dur) = (dir.join(&c.file), c.duration());
+            let mut silences = match self.audio.detect_silences(&file, -35, 0.4, ctx.cancel).await {
+                Err(Error::Cancelled) => return Err(Error::Cancelled),
+                r => r.unwrap_or_default(),
+            };
+            if silences.len() < 3 {
+                silences = match self.audio.detect_silences(&file, -28, 0.3, ctx.cancel).await {
+                    Err(Error::Cancelled) => return Err(Error::Cancelled),
+                    r => r.unwrap_or(silences),
+                };
+            }
+            let mut parts = Vec::new();
+            for (k, (s, e)) in audio::plan_chunks(dur, &silences, part, STT_PART_WINDOW).into_iter().enumerate() {
+                let rel = format!("chunks/chunk_{i:03}_p{k:02}.{NORMALIZED_EXT}");
+                self.audio.extract(&file, s, e, &dir.join(&rel)).await?;
+                parts.push(PartRecord { start: s, end: e, file: rel, stt: None });
+            }
+            p.chunks[i].parts = parts;
+            self.save(p, ctx.sink)?;
+        }
+        Ok(())
+    }
+
+    /// 小段都轉錄完了：接成整段的結果、刪掉小段音檔。
+    fn finish_parts(dir: &std::path::Path, c: &mut ChunkRecord) {
+        if c.stt.is_some() || c.parts.is_empty() || c.parts.iter().any(|x| x.stt.is_none()) {
+            return;
+        }
+        let joined: Vec<(f64, f64, &SttResult)> =
+            c.parts.iter().filter_map(|x| x.stt.as_ref().map(|r| (x.start, x.end, r))).collect();
+        c.stt = Some(SttResult::join_parts(&joined));
+        for x in std::mem::take(&mut c.parts) {
+            let _ = std::fs::remove_file(dir.join(&x.file));
+        }
+    }
+
+    /// 一輪轉錄，做完的段落（或小段）逐一存檔。回傳排隊逾時、要重送的（段落, 小段）與第一個其他錯誤。
     async fn transcribe_pending(
         &self,
         p: &mut Project,
         concurrency: usize,
         ctx: &Ctx<'_>,
-    ) -> Result<(Vec<usize>, Option<Error>)> {
-        let pending: Vec<usize> = p.chunks.iter().filter(|c| c.stt.is_none()).map(|c| c.index).collect();
-        let total = p.chunks.len();
+    ) -> Result<(Vec<(usize, Option<usize>)>, Option<Error>)> {
+        let dir = self.store.dir(p.id);
+        // (段落, 小段, 音檔, 長度)
+        let mut pending: Vec<(usize, Option<usize>, std::path::PathBuf, f64)> = Vec::new();
+        for c in p.chunks.iter().filter(|c| c.stt.is_none()) {
+            if c.parts.is_empty() {
+                pending.push((c.index, None, dir.join(&c.file), c.duration()));
+            }
+            for (k, x) in c.parts.iter().enumerate().filter(|(_, x)| x.stt.is_none()) {
+                pending.push((c.index, Some(k), dir.join(&x.file), x.end - x.start));
+            }
+        }
+        let chunks = p.chunks.len();
+        let total: usize = p.chunks.iter().map(|c| c.parts.len().max(1)).sum();
         let mut timed_out = Vec::new();
         let mut failed = None;
         if !pending.is_empty() {
-            let dir = self.store.dir(p.id);
             let language = p.options.language.clone();
             let keyterms = p.options.keyterms.clone();
             let diarize = p.options.identify_speakers;
@@ -484,9 +555,7 @@ impl Engine {
                 done_before as f32 / total as f32,
                 format!("送出 {} 段給 {}", pending.len(), self.transcriber.model()),
             );
-            let paths: Vec<(usize, std::path::PathBuf)> =
-                pending.iter().map(|&i| (i, dir.join(&p.chunks[i].file))).collect();
-            let jobs = paths.into_iter().map(|(i, path)| {
+            let jobs = pending.into_iter().map(|(i, k, path, secs)| {
                 let language = language.clone();
                 let keyterms = keyterms.clone();
                 async move {
@@ -501,21 +570,21 @@ impl Engine {
                         };
                         self.transcriber.transcribe(req, ctx.cancel).await
                     };
-                    (i, r.await)
+                    (i, k, secs, r.await)
                 }
             });
             let mut stream = futures::stream::iter(jobs).buffer_unordered(concurrency);
             let mut done = done_before;
-            while let Some((i, r)) = stream.next().await {
+            while let Some((i, k, secs, r)) = stream.next().await {
                 let stt = match r {
                     Ok(stt) => stt,
                     Err(e) if e.is_gateway_timeout() => {
-                        timed_out.push(i);
+                        timed_out.push((i, k));
                         continue;
                     }
                     Err(e) => {
                         if !matches!(e, Error::Cancelled) {
-                            ctx.log(p, LogLevel::Warn, format!("第 {}/{} 段轉錄失敗：{e}", i + 1, total));
+                            ctx.log(p, LogLevel::Warn, format!("第 {}/{chunks} 段轉錄失敗：{e}", i + 1));
                         }
                         failed.get_or_insert(e);
                         continue;
@@ -523,17 +592,18 @@ impl Engine {
                 };
                 done += 1;
                 p.usage.stt_usd += stt.cost;
-                p.usage.stt_seconds += if stt.seconds > 0.0 {
-                    stt.seconds
-                } else {
-                    p.chunks[i].duration()
-                };
-                ctx.log(
-                    p,
-                    LogLevel::Info,
-                    format!("第 {}/{} 段轉錄完成（{} 字）", i + 1, total, stt.text.chars().count()),
-                );
-                p.chunks[i].stt = Some(stt);
+                p.usage.stt_seconds += if stt.seconds > 0.0 { stt.seconds } else { secs };
+                match k {
+                    None => p.chunks[i].stt = Some(stt),
+                    Some(k) => {
+                        p.chunks[i].parts[k].stt = Some(stt);
+                        Self::finish_parts(&dir, &mut p.chunks[i]);
+                    }
+                }
+                if let Some(s) = &p.chunks[i].stt {
+                    let msg = format!("第 {}/{chunks} 段轉錄完成（{} 字）", i + 1, s.text.chars().count());
+                    ctx.log(p, LogLevel::Info, msg);
+                }
                 self.save(p, ctx.sink)?;
                 ctx.progress(
                     p,
@@ -643,9 +713,11 @@ impl Engine {
                     let (times, timing) = match &word_times {
                         Some(t) => (t.clone(), Timing::Provider),
                         None => {
-                            // 模型的秒數常是假的（0,1,2… 等差）：不可信的整組丟掉，改依有聲音的時間分配
-                            let anchors = timing::plausible_anchors(&weights, &anchors, chunk.duration());
-                            let kind = if anchors.iter().flatten().count() >= 2 { Timing::Model } else { Timing::Estimated };
+                            // 模型的秒數常是假的（0,1,2… 等差）：不可信的整組丟掉；供應商每窗的開頭是確定的，優先
+                            let model = timing::plausible_anchors(&weights, &anchors, chunk.duration());
+                            let kind = if model.iter().flatten().count() >= 2 { Timing::Model } else { Timing::Estimated };
+                            let windows = window_starts(&weights, &unit_refs, &stt, chunk.duration());
+                            let anchors = timing::merge_anchors(&weights, &windows, &model);
                             (timing::fill(&weights, &anchors, chunk.duration(), &speech), kind)
                         }
                     };
@@ -672,7 +744,10 @@ impl Engine {
         } else {
             let (times, timing) = match word_times {
                 Some(t) => (t, Timing::Provider),
-                None => (timing::fill(&weights, &[], chunk.duration(), &speech), Timing::Estimated),
+                None => {
+                    let anchors = window_starts(&weights, &unit_refs, &stt, chunk.duration());
+                    (timing::fill(&weights, &anchors, chunk.duration(), &speech), Timing::Estimated)
+                }
             };
             self.push_units(p, &chunk, &units, &times, None, timing);
         }
@@ -880,16 +955,13 @@ impl Engine {
             self.push_units(p, chunk, &units, &times, None, Timing::Provider);
             return;
         }
-        let mut units = Vec::new();
-        let mut anchors = Vec::new();
-        for (text, (s, _)) in texts.iter().zip(&times) {
-            for (k, piece) in split_units(text, UNIT_MAX_CHARS).into_iter().enumerate() {
-                units.push(piece);
-                anchors.push((k == 0).then_some(*s));
-            }
-        }
+        // 供應商段落的開頭當錨點，被拉長的最後一窗只用它的開頭（timing::provider_anchors）
+        let units: Vec<String> = texts.iter().flat_map(|t| split_units(t, UNIT_MAX_CHARS)).collect();
+        let unit_refs: Vec<&str> = units.iter().map(String::as_str).collect();
+        // 沒有時間的段落也要算進字數位置，只是不會被當成錨點
+        let windows: Vec<(&str, f64, f64)> = turns.iter().map(|t| (t.1.as_str(), t.2.map_or(f64::NAN, |x| x.0), t.2.map_or(f64::NAN, |x| x.1))).collect();
         let weights: Vec<usize> = units.iter().map(|u| weight(u)).collect();
-        let anchors = timing::plausible_anchors(&weights, &anchors, chunk.duration());
+        let anchors = timing::plausible_anchors(&weights, &timing::provider_anchors(&unit_refs, &windows, chunk.duration()), chunk.duration());
         let times = timing::fill(&weights, &anchors, chunk.duration(), speech);
         self.push_units(p, chunk, &units, &times, None, Timing::Estimated);
     }
@@ -1039,6 +1111,12 @@ impl Engine {
     }
 }
 
+/// 供應商段落的開頭對到哪幾句（[`timing::provider_anchors`]），超出段落或不合理的拿掉。
+fn window_starts(weights: &[usize], units: &[&str], stt: &SttResult, duration: f64) -> Vec<Option<f64>> {
+    let windows: Vec<(&str, f64, f64)> = stt.segments.iter().map(|s| (s.text.as_str(), s.start, s.end)).collect();
+    timing::plausible_anchors(weights, &timing::provider_anchors(units, &windows, duration), duration)
+}
+
 /// 只有字詞層級有說話者時，把連續同一人的字詞併成一段。
 fn group_words_by_speaker(stt: &SttResult) -> Vec<Turn> {
     let mut out: Vec<Turn> = Vec::new();
@@ -1112,7 +1190,13 @@ pub async fn retime_project(audio: &AudioTool, dir: &std::path::Path, p: &mut Pr
             }
         }
         let weights: Vec<usize> = pieces.iter().map(|s| weight(&s.text)).collect();
-        let anchors = timing::plausible_anchors(&weights, &anchors, dur);
+        let model = timing::plausible_anchors(&weights, &anchors, dur);
+        let piece_refs: Vec<&str> = pieces.iter().map(|s| s.text.as_str()).collect();
+        let windows = match &chunk.stt {
+            Some(stt) => window_starts(&weights, &piece_refs, stt, dur),
+            None => vec![None; pieces.len()],
+        };
+        let anchors = timing::merge_anchors(&weights, &windows, &model);
         let times = timing::fill(&weights, &anchors, dur, &speech);
         for ((mut seg, (s, e)), a) in pieces.into_iter().zip(times).zip(&anchors) {
             seg.start = chunk.start + s;

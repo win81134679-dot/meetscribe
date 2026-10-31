@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- 對話框＋三行逐字稿；放在 108dp 畫布中央 66dp 的安全區內 -->
+<!-- 聲波＋三行逐字稿（電腦版 icon.ico 同一份幾何）；由 工具/make_icons.py 產生，改圖示改那支 -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="108dp"
     android:height="108dp"
@@ -7,8 +7,23 @@
     android:viewportHeight="108">
     <path
         android:fillColor="#FFFFFF"
-        android:pathData="M36,32h36a8,8 0,0 1,8 8v22a8,8 0,0 1,-8 8H52l-10,9v-9h-6a8,8 0,0 1,-8 -8V40a8,8 0,0 1,8 -8z" />
+        android:pathData="M27,50a3,3 0,0 1,6,0v8a3,3 0,0 1,-6,0z" />
     <path
-        android:fillColor="#7F77DD"
-        android:pathData="M38,42h32v4H38zM38,50h26v4H38zM38,58h18v4H38z" />
+        android:fillColor="#FFFFFF"
+        android:pathData="M36,40a3,3 0,0 1,6,0v28a3,3 0,0 1,-6,0z" />
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M45,45a3,3 0,0 1,6,0v18a3,3 0,0 1,-6,0z" />
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M54,52a3,3 0,0 1,6,0v4a3,3 0,0 1,-6,0z" />
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M68,40h12a3,3 0,0 1,0,6h-12a3,3 0,0 1,0,-6z" />
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M68,51h12a3,3 0,0 1,0,6h-12a3,3 0,0 1,0,-6z" />
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M68,62h5a3,3 0,0 1,0,6h-5a3,3 0,0 1,0,-6z" />
 </vector>

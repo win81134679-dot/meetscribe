@@ -1,4 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!-- 通知列：同一個圖案、單色；由 工具/make_icons.py 產生，改圖示改那支 -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="24dp"
     android:height="24dp"
@@ -6,5 +7,23 @@
     android:viewportHeight="24">
     <path
         android:fillColor="#FFFFFF"
-        android:pathData="M5,3h14a2,2 0,0 1,2 2v10a2,2 0,0 1,-2 2h-7l-4,4v-4H5a2,2 0,0 1,-2 -2V5a2,2 0,0 1,2 -2zM7,7v2h10V7zM7,11v2h7v-2z" />
+        android:pathData="M3,10.667a1,1 0,0 1,2,0v2.667a1,1 0,0 1,-2,0z" />
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M6,7.333a1,1 0,0 1,2,0v9.333a1,1 0,0 1,-2,0z" />
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M9,9a1,1 0,0 1,2,0v6a1,1 0,0 1,-2,0z" />
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M12,11.333a1,1 0,0 1,2,0v1.333a1,1 0,0 1,-2,0z" />
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M16.667,7.333h4a1,1 0,0 1,0,2h-4a1,1 0,0 1,0,-2z" />
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M16.667,11h4a1,1 0,0 1,0,2h-4a1,1 0,0 1,0,-2z" />
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M16.667,14.667h1.667a1,1 0,0 1,0,2h-1.667a1,1 0,0 1,0,-2z" />
 </vector>
