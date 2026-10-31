@@ -2,6 +2,7 @@
 name = "meetscribe-app"
 version = "1.1.0"
 edition = "2024"
+license.workspace = true
 
 [dependencies]
 chrono = "0.4.45"

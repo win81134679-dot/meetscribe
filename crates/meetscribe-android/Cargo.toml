@@ -2,6 +2,7 @@
 name = "meetscribe-android"
 version = "1.1.0"
 edition = "2024"
+license.workspace = true
 description = "MeetScribe Android 版的 JNI 橋：Kotlin 介面 ⇄ meetscribe-core"
 
 [lib]

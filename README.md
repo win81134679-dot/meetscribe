@@ -200,3 +200,10 @@ powershell -ExecutionPolicy Bypass -File android\build-apk.ps1 -Debug -Abis arm6
 產生，再照 `android\app\build.gradle.kts` 開頭的欄位寫 `keystore.properties`。
 
 架構與擴充方式見 `CLAUDE.md`，設計決定與進度見 `PLAN.md`。
+
+## 授權
+
+本專案以 [MIT 授權](LICENSE) 釋出，可自由使用、修改、散布（含商業用途），保留著作權與授權聲明即可。
+
+例外：`third_party/mp3lame-sys/` 內含的 LAME MP3 編碼器是 **LGPL-3.0**（見該資料夾的 `LICENSE`、`lame-3.100/COPYING`），Android 版用它編 MP3；
+它以獨立函式庫的形式使用，修改它的部分要依 LGPL 公開。其他相依套件依各自的授權（多為 MIT／Apache-2.0）。
