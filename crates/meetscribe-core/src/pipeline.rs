@@ -32,7 +32,8 @@ const CUT_WINDOW_SECS: f64 = 90.0;
 /// 送轉錄的小段長度（秒）：每小段的開頭是確定的時間，跟隨播放才準（見 [`crate::model::PartRecord`]）。
 /// 真實會議（音樂課）用強制對齊量過：300 秒一窗中位差 10～40 秒，模擬每 60 秒一個確定時間點降到 1～4 秒。
 /// 費用照音訊秒數算（實測每秒 0.0000333 美元、跟長度無關），切短不會變貴。
-const STT_PART_SECS: f64 = 60.0;
+/// 固定值、不給使用者調；電腦與手機的設定頁都從這裡讀來顯示（`chunk_minutes` 是說話者辨識的段落長度）。
+pub const STT_PART_SECS: f64 = 60.0;
 /// 小段切點在理想位置前後幾秒內找停頓。
 const STT_PART_WINDOW: f64 = 15.0;
 /// 轉錄服務排隊逾時時最多重送幾輪（逾時不收費）。
@@ -400,7 +401,12 @@ impl Engine {
             ctx.log(
                 p,
                 LogLevel::Info,
-                format!("全長 {}，分成 {} 段處理", fmt_clock(p.duration), chunks.len()),
+                format!(
+                    "全長 {}，分成 {} 段辨識說話者（每段約 {} 分鐘）",
+                    fmt_clock(p.duration),
+                    chunks.len(),
+                    self.settings.chunk_minutes
+                ),
             );
             p.chunks = chunks;
             self.save(p, ctx.sink)?;
@@ -503,6 +509,8 @@ impl Engine {
                 self.audio.extract(&file, s, e, &dir.join(&rel)).await?;
                 parts.push(PartRecord { start: s, end: e, file: rel, stt: None });
             }
+            let msg = format!("第 {}/{} 段切成 {} 小段送轉錄（每小段約 {part:.0} 秒）", i + 1, p.chunks.len(), parts.len());
+            ctx.log(p, LogLevel::Info, msg);
             p.chunks[i].parts = parts;
             self.save(p, ctx.sink)?;
         }
@@ -609,7 +617,7 @@ impl Engine {
                     p,
                     Stage::Transcribe,
                     done as f32 / total as f32,
-                    format!("已完成 {done}/{total} 段"),
+                    format!("已完成 {done}/{total} 小段"),
                 );
             }
         }

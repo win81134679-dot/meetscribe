@@ -169,6 +169,7 @@ impl Bridge {
                 "recordings_dir": s.library.root(),
                 "version": env!("CARGO_PKG_VERSION"),
                 "device_id": update::device_id(&s.paths.root),
+                "stt_part_secs": meetscribe_core::pipeline::STT_PART_SECS,
             })),
             // App 啟動時叫一次：識別碼、剛從哪版更新上來（只回報一次）、已下載好等著安裝的新版
             "update_info" => {

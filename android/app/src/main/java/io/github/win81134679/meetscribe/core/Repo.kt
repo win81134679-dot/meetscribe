@@ -67,6 +67,8 @@ object Repo {
     /** 錄音機把檔寫在這裡（`<uuid>/<名稱>.m4a`），永久保存。 */
     var recordingsDir: File = File("."); private set
     var version: String = ""; private set
+    /** 送轉錄的小段長度（秒），Rust `pipeline::STT_PART_SECS`。 */
+    var sttPartSecs: Int = 60; private set
     /** App 的版本（versionName；Rust 的版本號跟它一樣，但測試版可以只改 APK 的）。 */
     var appVersion: String = ""; private set
     var initError: String? = null; private set
@@ -159,6 +161,7 @@ object Repo {
         importsDir = File(st.optString("imports_dir"))
         recordingsDir = File(st.optString("recordings_dir"))
         version = st.optString("version")
+        sttPartSecs = st.optInt("stt_part_secs", 60)
     }
 
     fun parseKeys(o: JSONObject) = mapOf(

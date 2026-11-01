@@ -326,8 +326,17 @@ pub fn show(app: &mut MeetApp, ui: &mut Ui) {
 
         theme::section(ui, "處理", |ui| {
             let d = &mut f.draft;
-            ui.add(egui::Slider::new(&mut d.chunk_minutes, 5..=55).text("每段分鐘數（長錄音依停頓切段）"));
-            ui.add(egui::Slider::new(&mut d.stt_concurrency, 1..=8).text("同時轉錄段數"));
+            let part = meetscribe_core::pipeline::STT_PART_SECS;
+            ui.label(format!("轉錄：每約 {part:.0} 秒一小段送出（固定，切在停頓）"));
+            theme::hint(ui, "每小段的開頭是確定的時間，逐字稿跟隨播放才準；費用照秒數算，切小段不會變貴。");
+            ui.add_space(4.0);
+            ui.add(egui::Slider::new(&mut d.chunk_minutes, 5..=55).text("說話者辨識：每段分鐘數"));
+            theme::hint(
+                ui,
+                "說話者辨識一次聽多長的錄音（依停頓切段）。太短會用掉較多免費額度、跨段配對說話者也比較不準。",
+            );
+            ui.add_space(4.0);
+            ui.add(egui::Slider::new(&mut d.stt_concurrency, 1..=8).text("同時轉錄小段數"));
             ui.add(egui::Slider::new(&mut d.max_retries, 0..=8).text("失敗自動重試次數"));
             ui.add(egui::Slider::new(&mut d.reference_clip_limit, 0..=15).text("跨段比對時附幾位說話者的聲音樣本"));
             ui.checkbox(&mut d.deny_data_collection, "OpenRouter 只路由到不保留、不拿資料訓練的供應商（可能使部分模型無法使用）");

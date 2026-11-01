@@ -61,7 +61,8 @@ $src = "$PWD"; robocopy $src "Y:\5. NVIDIA Nemotron 3.5 Transcribe 逐字稿轉�
 1.3.2（手動同步會議內容：摘要頁「同步到其他裝置」、收件端自動套用＋還原上一版，見〈傳到其他裝置〉）同日發佈給所有裝置，`update_check` 兩個平台從 1.3.1 都挑到它。
 1.3.3（摘要改 OpenRouter 下拉選單、預設免費、標免費／付費與費率、可開官網，見〈使用者定的費用分工〉）同日發佈給所有裝置，`update_check` 兩個平台從 1.3.2 都挑到它。
 1.3.4（逐字稿點一下從那句播放：電腦雙擊修改、手機長按修改）同日發佈給所有裝置，`update_check` 兩個平台從 1.3.3 都挑到它。
-1.3.5（跟隨播放：供應商段落開頭當錨點、舊會議重新對齊；轉錄每 60 秒一小段；新圖示）同日發佈給所有裝置：線上 update.json 驗簽、兩個雜湊與建置輸出相同，`update_check` 兩個平台從 1.3.4 都挑到它。`publish.py` 發佈成功後清 `dist/`，只留各平台最新一版
+1.3.5（跟隨播放：供應商段落開頭當錨點、舊會議重新對齊；轉錄每 60 秒一小段；新圖示）同日發佈給所有裝置：線上 update.json 驗簽、兩個雜湊與建置輸出相同，`update_check` 兩個平台從 1.3.4 都挑到它。
+1.3.6（設定頁與處理紀錄顯示轉錄每約 60 秒一小段；說話者辨識段落改名）2026-11-02 發佈給所有裝置。`publish.py` 發佈成功後清 `dist/`，只留各平台最新一版
 （2026-10-31 使用者：「dist 資料夾只留最新的版本」；舊的正式版要在 GitHub Release 找得到才刪，`--keep-old` 不清，`prune` 單獨跑）。
 egui 離屏測試要驗雙擊時，直接往 `harness.input_mut().events` 送兩次 PointerButton 按下／放開；kittest 的 `click()` 走無障礙動作，永遠不會被判定成雙擊。
 建 APK 時模擬器要先關（`adb emu kill`）：兩個一起開 Gradle daemon 會被系統砍掉（記憶體不夠）。
@@ -125,6 +126,8 @@ PDF 是 `export/pdf.rs` 照 docx 模組的版面直接畫（krilla，手機沒�
   （`STT_PART_SECS`，切在停頓、`STT_PART_WINDOW` 15 秒內找）送轉錄，每小段做完就存檔、全部回來才 `SttResult::join_parts` 合併並刪小段音檔。
   每小段一定留一個帶起訖的段落，`provider_anchors` 把每小段開頭當錨點。真實音樂課第 2 段重新轉錄：中位 23.8→3.1 秒、p90 52.4→11.4 秒；費用 US$0.0193，跟整段送一樣（照秒數計費）。
   不能把 `chunk_minutes` 直接調成 1 分鐘：Gemini 免費額度撐不住十倍的說話者分配請求，跨段配對說話者也會變差。舊會議要重新轉錄才有小段（沒有自動做，會花錢）。
+  60 秒是固定值、不給使用者調；1.3.6 起兩邊設定頁都顯示「轉錄：每約 60 秒一小段送出」，`chunk_minutes` 標成「說話者辨識：每段分鐘數」，
+  處理紀錄寫「第 i/N 段切成 K 小段送轉錄」（2026-11-02 使用者看到設定只有 10 分鐘，以為小段沒生效）。手機從 `state` 的 `stt_part_secs` 讀，桌面直接用 `pipeline::STT_PART_SECS`。
   端對端測試大多設 `engine.stt_part_secs = 0.0` 驗整段行為；小段由 `parts_give_each_minute_a_known_start`、`queue_timeouts_with_parts_still_finish`、原生音訊那個完整流程測試驗。
   量誤差：`工具/時間誤差/對齊標準答案.py`（本機 Qwen3-ForcedAligner 對齊自己的逐字稿當答案）→ `工具/時間誤差/量誤差.py`。供應商給的逐字時間不能當答案。
   播放器本身是準的（`player::tests` 用嗶聲量過：MP3 誤差 0、AAC 固定晚 64 ms 是編碼器 priming）。

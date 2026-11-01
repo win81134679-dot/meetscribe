@@ -100,16 +100,25 @@ fun SettingsScreen() {
         }
 
         SectionCard("處理") {
+            Text("轉錄：每約 ${Repo.sttPartSecs} 秒一小段送出（固定，切在停頓）", style = MaterialTheme.typography.bodyLarge)
+            Text(
+                "每小段的開頭是確定的時間，逐字稿跟隨播放才準；費用照秒數算，切小段不會變貴。",
+                color = Pal.current.textMuted, style = MaterialTheme.typography.bodySmall,
+            )
+            Spacer(Modifier.height(12.dp))
             val chunk = settings.optInt("chunk_minutes", 10)
-            Text("每段長度：$chunk 分鐘", style = MaterialTheme.typography.bodyLarge)
-            Text("段落短，單次處理時間短，比較不會撞到服務的逾時。", color = Pal.current.textMuted, style = MaterialTheme.typography.bodySmall)
+            Text("說話者辨識：每段 $chunk 分鐘", style = MaterialTheme.typography.bodyLarge)
+            Text(
+                "說話者辨識一次聽多長的錄音（依停頓切段）。太短會用掉較多免費額度、跨段配對說話者也比較不準。",
+                color = Pal.current.textMuted, style = MaterialTheme.typography.bodySmall,
+            )
             var chunkDraft by remember(chunk) { mutableStateOf(chunk.toFloat()) }
             Slider(
                 value = chunkDraft, onValueChange = { chunkDraft = it }, valueRange = 2f..30f, steps = 27,
                 onValueChangeFinished = { save { put("chunk_minutes", chunkDraft.roundToInt()) } },
             )
             val conc = settings.optInt("stt_concurrency", 3)
-            Text("同時轉錄：$conc 段", style = MaterialTheme.typography.bodyLarge)
+            Text("同時轉錄：$conc 小段", style = MaterialTheme.typography.bodyLarge)
             var concDraft by remember(conc) { mutableStateOf(conc.toFloat()) }
             Slider(
                 value = concDraft, onValueChange = { concDraft = it }, valueRange = 1f..6f, steps = 4,

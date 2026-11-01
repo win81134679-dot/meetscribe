@@ -704,18 +704,27 @@ async fn parts_give_each_minute_a_known_start() {
     let engine = Engine::from_settings(&paths, settings, keys).await.unwrap();
     // 做完 2 小段就取消
     let cancel = CancellationToken::new();
+    let logs = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
     let sink: EventSink = {
         let cancel = cancel.clone();
-        Arc::new(move |e| {
-            if let Event::Updated(p) = e
-                && p.chunks.first().is_some_and(|c| c.parts.iter().filter(|x| x.stt.is_some()).count() >= 2)
+        let logs = logs.clone();
+        Arc::new(move |e| match e {
+            Event::Updated(p)
+                if p.chunks.first().is_some_and(|c| c.parts.iter().filter(|x| x.stt.is_some()).count() >= 2) =>
             {
                 cancel.cancel();
             }
+            Event::Log { message, .. } => logs.lock().unwrap().push(message),
+            _ => {}
         })
     };
     let first = engine.run(Project::new(source, JobOptions::default()), sink, cancel).await;
     assert_eq!(first.status, ProjectStatus::Cancelled);
+    let logs = logs.lock().unwrap().clone();
+    assert!(
+        logs.iter().any(|m| m.contains("切成 5 小段送轉錄（每小段約 60 秒）")),
+        "處理紀錄要看得到小段：{logs:?}"
+    );
     assert_eq!(first.chunks.len(), 1, "說話者分配仍是整段");
     let parts = &first.chunks[0].parts;
     let bounds: Vec<(f64, f64)> = parts.iter().map(|x| (x.start, x.end)).collect();
